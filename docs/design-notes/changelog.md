@@ -135,12 +135,14 @@ resumes from the last entry. Steady state is one round trip per poll.
    round trip), as the existing index client already reads other JuiceFS
    keys; that is an optimisation, not a change of behaviour.
 2. **Settling a file.** The reader acts after a file has been quiet for
-   half a second, as planned, **except** when the last `WRITE` committed
-   a slice of 32 MiB or more: a full slice means the writer is probably
-   still going, so the file settles after 30 seconds of quiet instead.
-   The cap of five minutes since the first change stays. Without this a
-   large copy gets intermediate versions; with it, a copy over a
-   connection that uploads 64 MiB in under 30 seconds gets one.
+   half a second, as planned. The plan to wait 30 seconds after a full
+   slice was **not** adopted: the integration rig showed that a 64 MiB file
+   (exactly one slice) then took 10 s to get its version instead of under
+   5, and the wait is not needed, because a file that is still being written
+   is not recorded anyway (its size on the drive is ahead of what has been
+   stored, so the copy is dropped, and the file's own close produces the entry
+   that records it). The option stays (`LOREFS_LONG_QUIET`, off by default) for
+   storage so slow that a writer pauses longer than that between slices.
 3. **Unfinished state.** The entries describe committed state, so the
    "recorded while still being written" fault of the folder watcher
    cannot occur through the log. A recorder in the writer's own mount
