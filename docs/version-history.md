@@ -66,7 +66,11 @@ the file has been quiet for half a second:
 - If the drive was made without a change log, or it was turned off
   (`lorefs admin changelog off`), versions come from that walk alone,
   every ten minutes. `lorefs status` says so and how to turn the log on:
-  `lorefs admin changelog on`.
+  `lorefs admin changelog on`. After the log is turned on, a computer's
+  mount takes a few seconds to a minute to start writing to it, so a
+  computer walks the drive once more a minute after it notices. After the log is turned on, a computer's
+  mount takes a few seconds to a minute to start writing to it, so a
+  computer walks the drive once more a minute after it notices.
 - Versions live in the hidden folder `.lorefs/history` at the top of the
   drive. Do not edit it by hand.
 

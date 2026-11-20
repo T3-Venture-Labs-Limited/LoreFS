@@ -90,8 +90,20 @@ sleep 3; out=$(lore status 2>&1); code=$?
 [ $code = 1 ] && echo "$out" | grep -q "Change log" && echo "$out" | grep -q "lorefs admin changelog on" && ok "status warns about it and says how to turn it on" || bad "status warns about the missing change log" "exit $code: $out"
 lore admin changelog on >/dev/null 2>&1 && ok "lorefs admin changelog on turns it back on" || bad "admin changelog on"
 within 30 grep -q "following the drive's change log" "$T/alpha/helper.log" && ok "the helper notices and starts following the log again (no restart)" || bad "the helper starts following the log again" "$(tail -3 "$T/alpha/helper.log")"
+# A mount reads the drive's settings again only now and then, so it takes a while before it
+# writes to the log after the log was turned on. Changes made meanwhile are not in the log.
+t0=$SECONDS; l0=$(idx get txnLastLog | tr -dc 0-9)
+while :; do
+  echo x >"$A/docs/probe-$SECONDS.md"; sleep 2
+  [ "$(idx get txnLastLog | tr -dc 0-9)" != "$l0" ] && break
+  [ $((SECONDS-t0)) -gt 420 ] && break
+done
+took=$((SECONDS-t0))
+[ "$took" -le 420 ] && ok "the mount writes to the log again $took s after it was turned on (changes before that are caught by the walk)" || bad "the mount writes to the log again within 7 minutes"
 echo "log again" >"$A/docs/log-again.md"
-within 20 eval '[ "$(versions docs/log-again.md)" = 1 ]' && ok "and records from it" || bad "records from the log again"
+within 20 eval '[ "$(versions docs/log-again.md)" = 1 ]' && ok "and a save made now is recorded from the log" || bad "a save is recorded from the log again"
+for i in $(seq 1 40); do echo "probe $i" >"$A/docs/probe-b$i.md"; done
+within 60 eval '[ "$(versions docs/probe-b40.md)" = 1 ]' && ok "(and the files saved while it was catching up have their versions too)" || bad "files saved while the log was coming back have versions" "$(versions docs/probe-b40.md)"
 stop_helper
 
 section "A bulk copy: 2,000 files in 300 folders, eight at a time"
@@ -106,6 +118,13 @@ copied=$((SECONDS-t0)); tend=$SECONDS
 echo "  copying took $copied s"
 within 90 eval '[ "$(lore log --json -n 5000 2>/dev/null | jq "[.[] | select(.op == \"save\" and .version and (.path | startswith(\"bulk/\")))] | length")" -ge 2000 ]' \
   && ok "every file had a version within $((SECONDS-tend)) s of the copy ending" || bad "every copied file had a version within 90 s of the copy ending" "$(lore log --json -n 5000 2>/dev/null | jq "[.[] | select(.op == \"save\" and .version and (.path | startswith(\"bulk/\")))] | length") of 2000"
+if [ "$FAIL" != 0 ]; then
+  echo "  diagnostics: $(jq -c . "$T/alpha/state/helper.json" 2>/dev/null)"
+  echo "  position: $(cat "$T/alpha/state/changelog.json" 2>/dev/null); log holds $(idx llen txnLog) entries up to version $(idx get txnLastLog)"
+  tail -5 "$T/alpha/helper.log" | sed 's/^/  helper: /'
+  echo "  version files for bulk/: $(find "$A/.lorefs/history/bulk" -type f 2>/dev/null | wc -l); journal lines: $(cat "$A"/.lorefs/journal/alpha/* 2>/dev/null | wc -l) (bulk: $(cat "$A"/.lorefs/journal/alpha/* 2>/dev/null | grep -c '"path":"bulk/')); recorded lines in helper.log: $(grep -c 'recorded a version of bulk' "$T/alpha/helper.log")"
+  ls -la "$A/.lorefs/journal/alpha/" | sed 's/^/  journal: /'
+fi
 sleep 5
 saves=$(lore log --json -n 5000 | jq '[.[] | select(.op == "save" and .version and (.path | startswith("bulk/")))] | length')
 distinct=$(lore log --json -n 5000 | jq '[.[] | select(.op == "save" and .version and (.path | startswith("bulk/"))) | .path] | unique | length')

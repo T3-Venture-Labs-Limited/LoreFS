@@ -1,0 +1,33 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: |
+          go vet ./...
+          go test ./...
+      - name: Build the release files
+        run: scripts/make-release.sh "${GITHUB_REF_NAME#v}"
+      - name: Check the checksums
+        run: cd dist/release && sha256sum -c SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/release/* \
+            --title "LoreFS ${GITHUB_REF_NAME#v}" --generate-notes

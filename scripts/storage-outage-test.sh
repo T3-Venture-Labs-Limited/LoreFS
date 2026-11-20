@@ -27,13 +27,14 @@ bad() { FAIL=$((FAIL+1)); FAILED+=("$1"); printf '  \033[31m✗\033[0m %s\n' "$1
 section() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 within() { local s="$1"; shift; local end=$((SECONDS+s)); until "$@" >/dev/null 2>&1; do [ $SECONDS -ge $end ] && return 1; sleep 0.5; done; }
 
-A="$T/alpha/Lore"
+A="$T/alpha/Lore"; B="$T/beta/Lore"
 lore() { LOREFS_CONFIG_DIR="$T/alpha/config" LOREFS_STATE_DIR="$T/alpha/state" "$LORE" "$@"; }
+loreb() { LOREFS_CONFIG_DIR="$T/beta/config" LOREFS_STATE_DIR="$T/beta/state" "$LORE" "$@"; }
 setmode() { echo "$1" >"$T/mode"; sleep 0.6; }
 
 cleanup() {
   [ -f "$T/fwd.pid" ] && kill "$(cat "$T/fwd.pid")" 2>/dev/null
-  "$JFS" umount "$A" >/dev/null 2>&1 || fusermount3 -uz "$A" 2>/dev/null
+  for m in "$A" "$B"; do "$JFS" umount "$m" >/dev/null 2>&1 || fusermount3 -uz "$m" 2>/dev/null; done
   sleep 1; pkill -f "$JFS mount redis://127.0.0.1:$IDX_PORT" 2>/dev/null
   docker rm -f "$MINIO" "$IDX" >/dev/null 2>&1
   chmod -R u+rwx "$T" 2>/dev/null; rm -rf "$T"
@@ -41,7 +42,7 @@ cleanup() {
 trap 'echo; echo interrupted; cleanup; exit 130' INT TERM
 cleanup 2>/dev/null
 [ "${1:-}" = --cleanup-only ] && { echo "cleaned up $T"; exit 0; }
-mkdir -p "$T/minio" "$T/alpha"
+mkdir -p "$T/minio" "$T/alpha" "$T/beta"
 (cd "$ROOT" && go build -o bin/forwarder ./scripts/forwarder) || { echo "could not build the forwarder"; exit 1; }
 
 section "A drive whose storage is reached through a forwarder"
@@ -58,35 +59,38 @@ LOREFS_STORAGE_KEY="$S_KEY" LOREFS_STORAGE_SECRET="$S_SECRET" LOREFS_INDEX_PASSW
   --name otest-drive --machine alpha --folder "$A" --connect </dev/null >"$T/create.out" 2>"$T/create.err" && ok "the drive is created through the forwarder" || { bad "the drive is created" "$(cat "$T/create.err")"; cleanup; exit 1; }
 lore mount pre; lore mount run >"$T/alpha/mount.log" 2>&1 &
 within 40 test -e "$A/.config" && ok "the drive mounts" || { bad "the drive mounts"; cleanup; exit 1; }
-mkdir -p "$A/data"; head -c 5000000 /dev/urandom >"$A/data/uncached.bin"; echo "small and cached" >"$A/data/cached.txt"
-sync; sleep 2
-cat "$A/data/cached.txt" >/dev/null
-"$JFS" warmup "$A/data/cached.txt" >/dev/null 2>&1
-"$JFS" warmup --evict "$A/data/uncached.bin" >/dev/null 2>&1
-cat "$A/data/uncached.bin" >/dev/null && ok "an uncached read works while the storage is up" || bad "an uncached read works while the storage is up"
-"$JFS" warmup --evict "$A/data/uncached.bin" >/dev/null 2>&1
+# A second computer reads files its mount has never fetched: those are the uncached ones.
+grep '^lorefs2_' "$T/create.out" | loreb join --token-stdin --name beta --folder "$B" --cache-dir "$T/beta/cache" >/dev/null 2>&1 && ok "a second computer joins" || { bad "a second computer joins"; cleanup; exit 1; }
+loreb mount pre; loreb mount run >"$T/beta/mount.log" 2>&1 &
+within 40 test -e "$B/.config" && ok "and mounts the drive" || { bad "the second computer mounts the drive"; cleanup; exit 1; }
+mkdir -p "$A/data"; echo "small and cached" >"$A/data/cached.txt"; sync; sleep 2
+within 20 test -e "$B/data/cached.txt"; cat "$B/data/cached.txt" >/dev/null
+fresh() { # fresh NAME: a 5 MB file written on alpha that beta has never read
+  head -c 5000000 /dev/urandom >"$A/data/$1"; sync; within 30 test -e "$B/data/$1"; }
+fresh probe.bin
+cat "$B/data/probe.bin" >/dev/null && ok "an uncached read works while the storage is up" || bad "an uncached read works while the storage is up"
 
 outage() { # outage MODE
   local m="$1"
   section "The storage $( [ "$m" = refuse ] && echo refuses connections || echo stops answering )"
+  fresh "uncached-$m.bin"
   setmode "$m"
   t0=$SECONDS
-  timeout 400 cat "$A/data/uncached.bin" >/dev/null 2>"$T/read.err"; rc=$?
+  timeout 400 cat "$B/data/uncached-$m.bin" >/dev/null 2>"$T/read.err"; rc=$?
   took=$((SECONDS-t0))
   [ $rc -ne 0 ] && [ $rc -ne 124 ] && [ $took -le 180 ] && ok "an uncached read fails with an error after $took s (target: within 180 s)" || bad "an uncached read fails within 180 s" "rc=$rc after $took s: $(cat "$T/read.err")"
-  t0=$SECONDS; timeout 5 ls -la "$A/data" >/dev/null 2>&1 && ok "a folder listing still works ($((SECONDS-t0)) s)" || bad "a folder listing still works"
-  [ "$(timeout 10 cat "$A/data/cached.txt" 2>/dev/null)" = "small and cached" ] && ok "a cached file can still be read" || bad "a cached file can still be read"
+  t0=$SECONDS; timeout 5 ls -la "$B/data" >/dev/null 2>&1 && ok "a folder listing still works ($((SECONDS-t0)) s)" || bad "a folder listing still works"
+  [ "$(timeout 10 cat "$B/data/cached.txt" 2>/dev/null)" = "small and cached" ] && ok "a cached file can still be read" || bad "a cached file can still be read"
   t0=$SECONDS
   timeout 600 sh -c "head -c 200000 /dev/urandom >'$A/data/save-$m.bin' && sync" 2>"$T/save.err"; rc=$?
   took=$((SECONDS-t0))
   [ $rc -ne 0 ] && [ $rc -ne 124 ] && [ $took -le 360 ] && ok "a save fails with an error after $took s (target: within 360 s)" || bad "a save fails within 360 s" "rc=$rc after $took s: $(cat "$T/save.err")"
   setmode ok
   t0=$SECONDS
-  if within 60 sh -c "cat '$A/data/uncached.bin' >/dev/null 2>&1"; then ok "an uncached read works again $((SECONDS-t0)) s after the storage is back, without reconnecting (target: within 60 s)"; else bad "an uncached read works again within 60 s" "still failing after 60 s"; fi
+  if within 60 sh -c "cat '$B/data/uncached-$m.bin' >/dev/null 2>&1"; then ok "an uncached read works again $((SECONDS-t0)) s after the storage is back, without reconnecting (target: within 60 s)"; else bad "an uncached read works again within 60 s" "still failing after 60 s"; fi
   t0=$SECONDS
   if within 60 sh -c "echo recovered-$m >'$A/data/after-$m.txt' && sync"; then ok "a save works again $((SECONDS-t0)) s after the storage is back"; else bad "a save works again within 60 s"; fi
   [ "$(cat "$A/data/after-$m.txt" 2>/dev/null)" = "recovered-$m" ] && ok "and what was saved reads back" || bad "what was saved reads back"
-  "$JFS" warmup --evict "$A/data/uncached.bin" >/dev/null 2>&1
 }
 outage refuse
 outage silent

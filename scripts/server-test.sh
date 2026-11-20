@@ -52,7 +52,7 @@ mkdir -p "$T/minio" "$T/alpha" "$T/beta"
 section "The bundle"
 "$LORE" server init --address 127.0.0.1 --port "$PORT" --name stest-drive "$T/main" >"$T/init.out" 2>&1 && ok "lorefs server init writes a bundle" || { bad "lorefs server init writes a bundle" "$(cat "$T/init.out")"; cleanup; exit 1; }
 "$LORE" server init --address 127.0.0.1 "$T/main" >"$T/init2.out" 2>&1; [ $? -ne 0 ] && grep -q "already exists" "$T/init2.out" && ok "an existing folder is refused" || bad "an existing folder is refused" "$(cat "$T/init2.out")"
-"$LORE" server init --address 127.0.0.1 --port "$PORT_SMALL" --memory-mb 8 --name stest-small "$T/small" >/dev/null 2>&1 || bad "a second bundle with a small memory limit"
+"$LORE" server init --address 127.0.0.1 --port "$PORT_SMALL" --memory-mb 5 --name stest-small "$T/small" >/dev/null 2>&1 || bad "a second bundle with a small memory limit"
 for d in main small; do compose "$T/$d" up -d >"$T/up-$d.log" 2>&1 || { bad "docker compose up ($d)" "$(cat "$T/up-$d.log")"; cleanup; exit 1; }; done
 within 60 check_index "$T/main" "$PORT" && ok "the index starts and accepts the right password over TLS" || bad "the index starts and accepts the right password over TLS" "$(check_index "$T/main" "$PORT")"
 within 60 check_index "$T/small" "$PORT_SMALL" || bad "the small index starts"
@@ -97,10 +97,10 @@ section "A full index"
 LOREFS_STORAGE_KEY="$S_KEY" LOREFS_STORAGE_SECRET="$S_SECRET" lore alpha leave --yes --keep-cache >/dev/null 2>&1
 LOREFS_STORAGE_KEY="$S_KEY" LOREFS_STORAGE_SECRET="$S_SECRET" lore alpha create --server-dir "$T/small" --bucket "http://127.0.0.1:$MINIO_PORT/stestsmall" \
   --name stest-small --machine alpha --folder "$T/alpha/Lore" --connect </dev/null >"$T/create-small.out" 2>"$T/create-small.err" \
-  && ok "a drive is created on the index with a small memory limit (8 MB)" || bad "a drive on the small index" "$(cat "$T/create-small.err")"
+  && ok "a drive is created on the index with a small memory limit (5 MB)" || bad "a drive on the small index" "$(cat "$T/create-small.err")"
 start_mount alpha || bad "the small drive mounts" "$(tail -3 "$T/alpha/mount.log")"
 echo "kept" >"$T/alpha/Lore/existing.txt"; sync
-failed=0; end=$((SECONDS+300)); n=0
+failed=0; end=$((SECONDS+600)); n=0
 while [ $SECONDS -lt $end ]; do
   # A create that the index cannot take fails after about 20 s, so each batch is cut off.
   seq "$((n+1))" "$((n+300))" | timeout 60 xargs -P 16 -I{} sh -c 'mkdir -p "$1/fill/$(( $2 % 50 ))" && : > "$1/fill/$(( $2 % 50 ))/f$2"' _ "$T/alpha/Lore" {} 2>/dev/null

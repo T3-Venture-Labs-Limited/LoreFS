@@ -197,6 +197,14 @@ pid=$(pgrep -f "juicefs mount sqlite3.*$T/triala" | head -1)
 if [ -n "$pid" ]; then
   conns=$(ss -tnp 2>/dev/null | grep -c "pid=$pid,"); [ "$conns" = 0 ] && ok "the trial drive's mount holds no network connection" || bad "the trial drive's mount holds no network connection" "$conns found"
 fi
+# A rules file from an older template is mentioned, and left alone.
+cp "$T/triala/Lore/AGENTS.md" "$T/agents.before"
+sed -i 's/lorefs-rules-version: [0-9]*/lorefs-rules-version: 0/' "$T/triala/Lore/AGENTS.md"; cp "$T/triala/Lore/AGENTS.md" "$T/agents.old"
+lore triala status --json 2>/dev/null | jq -e '.checks[] | select(.id == "rules") | .level == "ok" and (.detail | test("older template"))' >/dev/null \
+  && ok "status mentions a rules file written from an older template, without calling it a problem" || bad "status mentions an older rules template"
+lore triala rules diff 2>&1 | grep -q "lorefs-rules-version" && ok "lorefs rules diff shows how it differs" || bad "rules diff shows the difference"
+cmp -s "$T/triala/Lore/AGENTS.md" "$T/agents.old" && ok "and neither changed the drive's file" || bad "the drive's rules file was changed"
+cp "$T/agents.before" "$T/triala/Lore/AGENTS.md"
 out=$(lore triala invite 2>&1); code=$?
 [ $code -ne 0 ] && echo "$out" | grep -q "trial drive" && echo "$out" | grep -q "lorefs create" && ok "invite on a trial drive explains instead of printing a code" || bad "invite on a trial drive explains" "exit $code: $out"
 stop_helper triala; stop_mount triala

@@ -1,100 +1,92 @@
 #!/usr/bin/env bash
-# Rehearsal of a colleague joining: installs the release package into an
-# empty pretend home folder on this computer, joins the REAL drive with a
-# fresh join code as a second computer, and checks that the two computers
-# work together. Run it before sending the package to someone.
+# Rehearsal of a colleague joining: builds a release, installs it into two
+# empty pretend home folders through the one-line installer (served from a
+# local folder), creates a throwaway drive (MinIO for the files, Redis for
+# the index) with `lorefs create` as the first computer, joins it with the
+# printed code as the second, and checks that the two work together with
+# the real timings of the program (no shortened waits, no systemd).
 #
-# It differs from itest.sh, which uses a throwaway drive on this computer
-# and shortened waiting times. This uses the real index and storage, the
-# real package and the real timings.
+# Run it before publishing a release. It does not touch any real drive.
 #
-# Usage: scripts/rehearse-join.sh [package.tar.gz]
-#   (default: the newest dist/lorefs-*.tar.gz)
-#
-# It creates a folder "rehearsal-<time>" on the drive and removes it at
-# the end. The files it deletes stay in the drive's trash for 7 days.
-#
-# Environment:
-#   REHEARSE_DIR   where the pretend home folder is made (default
-#                  ~/.cache; it should be on a disk, because the second
-#                  computer's cache of downloaded files lives in it)
-#   REHEARSE_HOOK  a program to run while both computers are connected,
-#                  for extra checks on real data. It gets K (the drive
-#                  here), B (the drive on the pretend computer), LORE and
-#                  CL (the lorefs program of each) in its environment, and
-#                  counts as one more check: it passes if it exits with 0.
+# Usage: scripts/rehearse-join.sh [--cleanup-only]
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
+export PATH="$HOME/.local/share/mise/installs/go/1.27.4/bin:$PATH"; unset GOROOT
 
-PKG="${1:-$(ls -t dist/lorefs-*-linux-amd64.tar.gz 2>/dev/null | head -1)}"
-[ -f "$PKG" ] || { echo "No package found. Run: make dist" >&2; exit 2; }
-LORE="${LORE:-$HOME/.local/bin/lorefs}"
-K="$("$LORE" status --json 2>/dev/null | jq -r '.folder // empty')"
-[ -n "$K" ] && grep -q " $K fuse.juicefs " /proc/self/mounts || { echo "The drive is not connected on this computer. Run: lorefs status" >&2; exit 2; }
-
-NAME="rehearsal-$(date +%H%M%S)"
-C="$(mktemp -d "${REHEARSE_DIR:-$HOME/.cache}/lorefs-rehearsal.XXXXXX")"
-B="$C/home/Lore"
-CL="$C/home/.local/bin/lorefs"
+C="${REHEARSE_DIR:-/tmp/lorefs-rehearsal}"
+NAME="second-$(date +%H%M%S)"
+H1="$C/home1"; H2="$C/home2"
+K="$H1/Lore"; B="$H2/Lore"
 T="rehearsal-$(date +%Y%m%d-%H%M%S)" # the test folder on the drive
+MINIO=lorefs-rehearse-minio; IDX=lorefs-rehearse-index; HTTP_PORT=18091
+S_KEY=rehearsekey; S_SECRET=rehearse-storage-secret-123; I_PW=rehearse-index-password-xyz
 export LOREFS_NO_SYSTEMD=1 LOREFS_NO_NOTIFY=1
-sim() { HOME="$C/home" "$@"; }
-
 PASS=0; FAIL=0; FAILED=()
 ok() { PASS=$((PASS + 1)); printf '  \033[32m✓\033[0m %s\n' "$1"; }
 bad() { FAIL=$((FAIL + 1)); FAILED+=("$1"); printf '  \033[31m✗\033[0m %s\n' "$1"; [ -n "${2:-}" ] && printf '      %s\n' "$2"; }
 section() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 within() { local s="$1"; shift; local end=$((SECONDS + s)); until eval "$*" >/dev/null 2>&1; do [ $SECONDS -ge $end ] && return 1; sleep 0.5; done; }
+sim() { HOME="$H2" "$@"; }
+mounted() { grep -q " $B fuse.juicefs " /proc/self/mounts; }
 versions() { "$LORE" history --json "$1" 2>/dev/null | jq '.versions | length' 2>/dev/null || echo 0; }
 newest_by() { "$LORE" history --json "$1" 2>/dev/null | jq -r '.versions[0].machine'; }
-mounted() { grep -q " $B fuse.juicefs " /proc/self/mounts; }
+mounted1() { grep -q " $K fuse.juicefs " /proc/self/mounts; }
 
 cleanup() {
   section "Clearing up"
-  if [ "$FAIL" != 0 ] || [ -n "${KEEP_LOGS:-}" ]; then
-    L="/tmp/lorefs-rehearsal-logs-$(date +%H%M%S)"; mkdir -p "$L"
-    cp "$C"/*.log "$L"/ 2>/dev/null; cp "$C/home/.local/state/lorefs/"*.log "$L"/ 2>/dev/null
-    echo "  logs of the pretend second computer kept in $L"
-  fi
-  pkill -f "$CL helper run" 2>/dev/null
-  if mounted; then sim "$CL" leave --yes --delete-cache >/dev/null 2>&1; fi
-  mounted && { fusermount3 -u "$B" 2>/dev/null || fusermount -u "$B" 2>/dev/null; sleep 1; }
-  pkill -f "$CL mount run" 2>/dev/null
-  if mounted; then
-    echo "  The rehearsal drive is still connected at $B; NOT deleting $C. Disconnect it with: fusermount3 -u $B"
-  else
-    chmod -R u+w "$C" 2>/dev/null
-    rm -rf --one-file-system "$C" && echo "  removed the pretend home folder"
-  fi
-  # The rehearsal's traces on the real drive.
-  if [ -d "$K/$T" ]; then rm -rf "${K:?}/$T" && echo "  removed $T from the drive"; fi
-  rm -rf "${K:?}/.lorefs/history/$T" "${K:?}/.lorefs/journal/$NAME" 2>/dev/null
+  [ -f "$C/helper1.pid" ] && kill "$(cat "$C/helper1.pid")" 2>/dev/null
+  [ -f "$C/helper2.pid" ] && kill "$(cat "$C/helper2.pid")" 2>/dev/null
+  [ -f "$C/http.pid" ] && kill "$(cat "$C/http.pid")" 2>/dev/null
+  sleep 1
+  for m in "$B" "$K"; do fusermount3 -uz "$m" 2>/dev/null; done
+  sleep 1; pkill -f "juicefs mount redis://127.0.0.1:16490" 2>/dev/null
+  docker rm -f "$MINIO" "$IDX" >/dev/null 2>&1
+  chmod -R u+rwx "$C" 2>/dev/null; rm -rf "$C"
 }
 trap cleanup EXIT
+[ "${1:-}" = --cleanup-only ] && { trap - EXIT; cleanup; exit 0; }
+cleanup >/dev/null 2>&1
+mkdir -p "$C/rel" "$H1" "$H2" "$C/minio"
 
-echo "Package:  $PKG"
-echo "Drive:    $K (this computer), $B (pretend second computer \"$NAME\")"
-
-section "Installing from the package, as the colleague would"
-(cd "$(dirname "$PKG")" && sha256sum -c --quiet "$(basename "$PKG").sha256") && ok "the package matches its checksum" || bad "the package matches its checksum"
-mkdir -p "$C/home" "$C/unpack"
-tar -C "$C/unpack" -xzf "$PKG"
-D="$(echo "$C"/unpack/*/)"
-[ -x "$D/install.sh" ] && [ -x "$D/lorefs" ] && [ -f "$D/README.txt" ] && ok "the package holds the installer, the program and the instructions" || bad "the package holds the installer, the program and the instructions" "$(ls "$D")"
-out=$(sim "$D/install.sh" 2>&1) && [ -x "$CL" ] && [ -x "$C/home/.local/bin/juicefs" ] && ok "install.sh installs lorefs and the storage engine" || bad "install.sh installs lorefs and the storage engine" "$(echo "$out" | tail -3)"
+section "Building a release and installing it as colleagues would"
+scripts/make-release.sh 0.0.9 >"$C/make.log" 2>&1 && cp dist/release/* "$C/rel/" || { bad "make release" "$(tail -3 "$C/make.log")"; exit 1; }
+(cd "$C/rel" && exec python3 -m http.server "$HTTP_PORT" --bind 127.0.0.1 >"$C/http.log" 2>&1) & echo $! >"$C/http.pid"
+within 10 curl -sf "http://127.0.0.1:$HTTP_PORT/SHA256SUMS" || { bad "the release server starts"; exit 1; }
+export LOREFS_RELEASE_URL="http://127.0.0.1:$HTTP_PORT"
+for n in 1 2; do
+  h="$C/home$n"
+  out=$(HOME="$h" sh "$C/rel/install.sh" 2>&1) && [ -x "$h/.local/bin/lorefs" ] && [ -x "$h/.local/bin/juicefs" ] \
+    && ok "the one-line installer installs lorefs and the storage engine for computer $n" || bad "the one-line installer for computer $n" "$(echo "$out" | tail -3)"
+  printf '#!/bin/sh\nexport HOME="%s"\nexec "%s/.local/bin/lorefs" "$@"\n' "$h" "$h" >"$C/lore$n"; chmod +x "$C/lore$n"
+done
+LORE="$C/lore1"; CL="$C/lore2"
 echo "$out" | grep -q "lorefs join" && ok "the installer says what to do next" || bad "the installer says what to do next"
-[ "$(sim "$CL" version | head -1)" = "$("$LORE" version | head -1)" ] && ok "both computers run the same version ($("$LORE" version | head -1))" || bad "both computers run the same version" "$(sim "$CL" version | head -1) vs $("$LORE" version | head -1)"
+[ "$("$LORE" version | head -1)" = "$("$CL" version | head -1)" ] && ok "both computers run the same version ($("$LORE" version | head -1))" || bad "both computers run the same version"
+
+section "Creating the drive on computer 1 and joining from computer 2"
+docker run -d --name "$MINIO" --user "$(id -u):$(id -g)" -p 127.0.0.1:19400:9000 -v "$C/minio:/data" \
+  -e MINIO_ROOT_USER="$S_KEY" -e MINIO_ROOT_PASSWORD="$S_SECRET" cgr.dev/chainguard/minio:latest server /data >/dev/null || exit 2
+docker run -d --name "$IDX" -p 127.0.0.1:16490:6379 redis:8-alpine redis-server --requirepass "$I_PW" --appendonly no >/dev/null || exit 2
+within 30 curl -sf http://127.0.0.1:19400/minio/health/live || { bad "MinIO starts"; exit 2; }
+within 20 docker exec "$IDX" redis-cli -a "$I_PW" --no-auth-warning ping
+LOREFS_STORAGE_KEY="$S_KEY" LOREFS_STORAGE_SECRET="$S_SECRET" LOREFS_INDEX_PASSWORD="$I_PW" "$LORE" create \
+  --bucket http://127.0.0.1:19400/rehearsebucket --index redis://127.0.0.1:16490/1 --allow-unencrypted-index --name rehearse-drive --machine first \
+  --folder "$K" --connect </dev/null >"$C/create.out" 2>"$C/create.err" && ok "lorefs create makes the drive and connects computer 1" || { bad "lorefs create" "$(tail -3 "$C/create.err")"; exit 1; }
+"$LORE" mount pre >/dev/null 2>&1
+(HOME="$H1" setsid "$H1/.local/bin/lorefs" mount run >"$C/mount1.log" 2>&1 &)
+within 40 mounted1 && ok "computer 1's drive connects" || { bad "computer 1's drive connects" "$(tail -3 "$C/mount1.log")"; exit 1; }
+(HOME="$H1" setsid "$H1/.local/bin/lorefs" helper run >"$C/helper1.log" 2>&1 & echo $! >"$C/helper1.pid")
 
 section "Joining with a join code"
 out=$("$LORE" invite --quiet | sim "$CL" join --token-stdin --name "$NAME" 2>&1) && ok "lorefs join accepts a fresh code from lorefs invite" || bad "lorefs join accepts a fresh code from lorefs invite" "$(echo "$out" | tail -3)"
-[ "$(stat -c %a "$C/home/.config/lorefs/secret.env")" = 600 ] && ok "the saved secret is readable by the owner only" || bad "the saved secret is readable by the owner only"
+[ "$(stat -c %a "$H2/.config/lorefs/secret.env")" = 600 ] && ok "the saved secret is readable by the owner only" || bad "the saved secret is readable by the owner only"
 ( echo x >"$B/should-fail" ) 2>/dev/null && bad "before connecting, the folder refuses files" || ok "before connecting, the folder refuses files"
 
 # No systemd in the pretend home, so start what the services would start.
 sim "$CL" mount pre >/dev/null 2>&1
-(HOME="$C/home" setsid "$CL" mount run >"$C/mount.log" 2>&1 &)
+(HOME="$H2" setsid "$H2/.local/bin/lorefs" mount run >"$C/mount.log" 2>&1 &)
 within 30 mounted && ok "the drive connects" || { bad "the drive connects" "$(tail -3 "$C/mount.log")"; exit 1; }
-(HOME="$C/home" setsid "$CL" helper run >"$C/helper.log" 2>&1 &)
+(HOME="$H2" setsid "$H2/.local/bin/lorefs" helper run >"$C/helper.log" 2>&1 & echo $! >"$C/helper2.pid")
 t0=$SECONDS
 within 60 'sim "$CL" status >/dev/null' && ok "lorefs status reports that everything is working ($((SECONDS - t0)) s after connecting)" || bad "lorefs status reports that everything is working" "$(sim "$CL" status | grep -v '✓' | head -5)"
 [ "$(ls "$B" | sort | tr '\n' ' ')" = "$(ls "$K" | sort | tr '\n' ' ')" ] && ok "the second computer sees the same files" || bad "the second computer sees the same files"
@@ -121,8 +113,7 @@ wait $p1; r1=$?; wait $p2; r2=$?
 
 section "Version history across the two computers"
 within 15 '[ "$(versions "$T/a.md")" -ge 1 ]' && ok "this computer records its own saves" || bad "this computer records its own saves"
-# The folder was made here, so the second computer must learn of it
-# before its helper can see edits inside. Edit at once, on purpose.
+# The folder was made here seconds ago. Edit there at once, on purpose.
 echo "edited on the second computer, straight away" >"$B/$T/a.md"
 within 90 '[ "$(newest_by "$T/a.md")" = "$NAME" ]' && ok "an edit there, in a folder made here seconds earlier, gets its version" || bad "an edit there, in a folder made here seconds earlier, gets its version" "newest by: $(newest_by "$T/a.md")"
 n=$(versions "$T/a.md"); echo "edited again on the second computer" >"$B/$T/a.md"
@@ -158,20 +149,19 @@ rm "$B/$T/reel.mp4"; sleep 2
 
 section "Fast folders"
 for i in 1 2 3 4 5 6 7 8; do echo "small note $i" >"$K/$T/n$i.md"; done
-pct() { "$C/home/.local/bin/juicefs" warmup --check "$1" 2>&1 | grep -o '([0-9.]*%) cached' | tr -d '()% cached'; }
+pct() { "$H2/.local/bin/juicefs" warmup --check "$1" 2>&1 | grep -o '([0-9.]*%) cached' | tr -d '()% cached'; }
 within 60 '[ "$(pct "$B/$T")" = "100.0" ]' && ok "notes saved here are ready there without being opened" || bad "notes saved here are ready there without being opened" "ready: $(pct "$B/$T")%"
 
 if [ -n "${REHEARSE_HOOK:-}" ]; then
   section "Extra checks ($REHEARSE_HOOK)"
-  if K="$K" B="$B" LORE="$LORE" CL="$CL" SIM_HOME="$C/home" "$REHEARSE_HOOK" 2>&1 | sed 's/^/      /'; [ "${PIPESTATUS[0]}" = 0 ]; then ok "the extra checks passed"; else bad "the extra checks passed"; fi
+  if K="$K" B="$B" LORE="$LORE" CL="$CL" SIM_HOME="$H2" "$REHEARSE_HOOK" 2>&1 | sed 's/^/      /'; [ "${PIPESTATUS[0]}" = 0 ]; then ok "the extra checks passed"; else bad "the extra checks passed"; fi
 fi
 
 section "Leaving"
-pkill -f "$CL helper run"; sleep 1
+kill "$(cat "$C/helper2.pid")" 2>/dev/null; sleep 1
 out=$(sim "$CL" leave --yes --delete-cache 2>&1); sleep 2
 mounted && { fusermount3 -u "$B" 2>/dev/null; sleep 1; }
-pkill -f "$CL mount run" 2>/dev/null
-! mounted && [ ! -e "$C/home/.config/lorefs/secret.env" ] && ok "lorefs leave disconnects and removes the saved secret" || bad "lorefs leave disconnects and removes the saved secret" "$(echo "$out" | tail -3)"
+! mounted && [ ! -e "$H2/.config/lorefs/secret.env" ] && ok "lorefs leave disconnects and removes the saved secret" || bad "lorefs leave disconnects and removes the saved secret" "$(echo "$out" | tail -3)"
 [ ! -e "$K/.lorefs/machines/$NAME.json" ] && ok "the computer that left no longer counts in the version line" || bad "the computer that left no longer counts in the version line"
 grep -q "small note 3" "$K/$T/n3.md" && ok "the files are still on the drive after the other computer left" || bad "the files are still on the drive after the other computer left"
 
