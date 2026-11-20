@@ -1,6 +1,8 @@
 # Verification of the first release
 
-Written 21 November 2026 for the release candidate. It records which check
+Written 21 November 2026 for the release candidate (tag `v0.1.0-rc.1`). Each
+script was last run against the program built from the commit before the tag
+(later commits changed documents and scripts only). It records which check
 covers each requirement of the first release, the results of the last full
 run, and what could only be verified by reading.
 
@@ -13,19 +15,19 @@ and clean up after themselves.
 | Short name | Command | What it does | Last result |
 |---|---|---|---|
 | unit | `go test -race ./...` | 20 packages: parsers, resolver, grouping, settings, codes, status, backup, restore, update, bundle, certificates | all pass; `staticcheck` and `govulncheck` clean |
-| itest | `scripts/itest.sh --fast` | two computers on one drive (Redis); `INDEX_IMAGE=valkey/valkey:8-alpine` runs it on Valkey | RESULT_ITEST_REDIS / RESULT_ITEST_VALKEY |
-| create | `scripts/create-test.sh` | creating drives (MinIO and Redis), joining, trial drives, prompts, ps | RESULT_CREATE |
-| server | `scripts/server-test.sh` | the index bundle with Docker: TLS, password, certificate, restart, full index | RESULT_SERVER |
-| squash | `scripts/squash-test.sh` | a second user with another user number in a container | RESULT_SQUASH |
-| recorder | `scripts/recorder-test.sh` | version recording from the change log: resume, gaps, no log, bulk copy | RESULT_RECORDER |
-| slow | `scripts/slowlink-test.sh` | a computer 510 ms from the index | RESULT_SLOW |
-| backup | `scripts/backup-test.sh` | backup, schedule, restore, drill, restore from the backup alone | RESULT_BACKUP |
-| outage | `scripts/storage-outage-test.sh` | storage refusing or silent, recovery | RESULT_OUTAGE |
-| release | `scripts/release-test.sh` | release files, one-line installer, `lorefs update` | RESULT_RELEASE |
-| distro | `scripts/distro-test.sh` | Ubuntu, Debian, Fedora and Arch containers | RESULT_DISTRO |
-| walk | `scripts/distro-test.sh walkthrough` | the README's first section in a fresh container | RESULT_WALK |
-| rehearse | `scripts/rehearse-join.sh` | a colleague's install and join from a release archive | RESULT_REHEARSE |
-| compat | `scripts/compat-test.sh` | a computer joined with the earlier program | RESULT_COMPAT |
+| itest | `scripts/itest.sh --fast` | two computers on one drive (Redis); `INDEX_IMAGE=valkey/valkey:8-alpine` runs it on Valkey | 123 of 123 (Redis) / 123 of 123 (Valkey) |
+| create | `scripts/create-test.sh` | creating drives (MinIO and Redis), joining, trial drives, prompts, ps | 44 of 44 |
+| server | `scripts/server-test.sh` | the index bundle with Docker: TLS, password, certificate, restart, full index | 21 of 21 |
+| squash | `scripts/squash-test.sh` | a second user with another user number in a container | 21 of 21 |
+| recorder | `scripts/recorder-test.sh` | version recording from the change log: resume, gaps, no log, bulk copy | 21 of 21 |
+| slow | `scripts/slowlink-test.sh` | a computer 510 ms from the index | 16 of 16 |
+| backup | `scripts/backup-test.sh` | backup, schedule, restore, drill, restore from the backup alone | 40 of 40 |
+| outage | `scripts/storage-outage-test.sh` | storage refusing or silent, recovery | 20 of 20 (timings in docs/performance.md) |
+| release | `scripts/release-test.sh` | release files, one-line installer, `lorefs update` | 20 of 20 |
+| distro | `scripts/distro-test.sh` | Ubuntu, Debian, Fedora and Arch containers | 4 of 4 distributions |
+| walk | `scripts/distro-test.sh walkthrough` | the README's first section in a fresh container | passes in 24 s |
+| rehearse | `scripts/rehearse-join.sh` | a colleague's install and join from a release archive | 35 of 35 |
+| compat | `scripts/compat-test.sh` | a computer joined with the earlier program | 12 of 12 |
 | privacy | `scripts/check-private-test.sh`, `scripts/check-private.sh` | secrets, addresses, private words | passes, 17 of 17 |
 | ext | `python3 scripts/nautilus-extension-test.py` | the file-manager entry's logic against a stand-in API | passes |
 | lint | `actionlint`, `shellcheck -S warning` | workflow files and every script | clean |

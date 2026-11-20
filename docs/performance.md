@@ -50,7 +50,8 @@ generous for tens of thousands of files.
 | Index down for minutes | the status page and a notification say so; both services stay up |
 | Index back | answering within 2 s, no remount |
 | Index restarted or its server rebooted | all files and versions present |
-| Storage unreachable | uncached reads fail within 3 minutes, saves within 6 minutes, listings and cached files keep working, everything recovers within a minute |
+| Storage refusing connections | an uncached read fails after 2 s, a save after 3.4 minutes; listings and cached files keep working; everything works again within a second of the storage coming back, without reconnecting |
+| Storage not answering at all | an uncached read fails after 2.5 minutes, a save after 5 minutes; the same otherwise |
 | Drive stopped | the folder becomes read-only and empty; creating a file is refused |
 
 JuiceFS waits a fixed 30 seconds for an answer on a connection before trying
