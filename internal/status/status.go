@@ -76,11 +76,15 @@ type Inputs struct {
 	HelperRunning bool
 	HelperSince   time.Time
 	LastVersion   time.Time
-	// HelperReady is false while the helper is still looking at every
-	// folder after starting; HelperWatched is how many it has looked at.
+	// HelperReady is false while the helper is still starting;
+	// HelperLogRead is how many change-log entries it has read so far.
 	HelperReady   bool
-	HelperWatched int
+	HelperLogRead int64
 
+	// The rules file on the drive and the template this program carries.
+	RulesKnown   bool
+	RulesVersion int
+	RulesCurrent int
 	// The program on this computer, and what the computers on the drive
 	// say they run (this one included, once its helper has started).
 	Machine    string
@@ -159,13 +163,13 @@ func Evaluate(in Inputs) []Check {
 
 	// Version recorder.
 	if in.HelperRunning && !in.HelperReady {
-		// Starting: it looks at every folder first, which takes seconds
-		// on a nearby index and minutes on a slow connection.
+		// Starting: it reads the change log from the index, which takes
+		// seconds on a nearby index and a minute or more on a slow one.
 		c := Check{ID: "history", Title: "Version history", Level: OK,
-			Detail: fmt.Sprintf("starting: %d folders looked at so far. Saves made meanwhile are recorded once it is ready.", in.HelperWatched)}
+			Detail: fmt.Sprintf("starting: %d changes read so far. Saves made meanwhile are recorded once it is ready.", in.HelperLogRead)}
 		if d := in.Now.Sub(in.HelperSince); d > 5*time.Minute {
 			c.Level = Warn
-			c.Detail = fmt.Sprintf("still starting after %d minutes (%d folders looked at so far). Saves made meanwhile are recorded once it is ready.", int(d.Minutes()), in.HelperWatched)
+			c.Detail = fmt.Sprintf("still starting after %d minutes (%d changes read so far). Saves made meanwhile are recorded once it is ready.", int(d.Minutes()), in.HelperLogRead)
 			c.Next = "It takes this long only when the connection to the index is slow; see the Index line above."
 		}
 		add(c)
@@ -233,7 +237,7 @@ func Evaluate(in Inputs) []Check {
 		} else {
 			add(Check{ID: "change-log", Title: "Change log", Level: Warn,
 				Detail: "The drive's change log is off, so changes cannot be recorded in version history as they happen.",
-				Next:   "Turn it on with: lorefs repair"})
+				Next:   "Turn it on with: lorefs admin changelog on"})
 		}
 	}
 
@@ -251,6 +255,11 @@ func Evaluate(in Inputs) []Check {
 			add(Check{ID: "index-memory", Title: "Index memory", Level: OK,
 				Detail: fmt.Sprintf("%s of %s used (%d%%)", Size(in.MemUsed), Size(in.MemLimit), int(100*in.MemUsed/in.MemLimit))})
 		}
+	}
+	if in.RulesKnown && in.RulesVersion < in.RulesCurrent {
+		add(Check{ID: "rules", Title: "Rules file", Level: OK,
+			Detail: fmt.Sprintf("the rules file for agents on the drive was written from an older template (version %d, this program has %d); it was not changed", in.RulesVersion, in.RulesCurrent),
+			Next:   "See the differences with: lorefs rules diff"})
 	}
 	if in.Version != "" {
 		add(programCheck(in))

@@ -9,9 +9,35 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/config"
 	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/history"
+	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/index"
 	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/jfs"
+	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/mount"
 )
+
+// indexRequest times one request to the index (the second, so that setting up
+// the connection is not counted). It returns 0 when that cannot be done.
+func indexRequest(cfg config.Config) time.Duration {
+	if cfg.IsLocal() {
+		return 0
+	}
+	target, err := mount.Target(cfg)
+	if err != nil {
+		return 0
+	}
+	conn, err := index.Dial(target, 10*time.Second)
+	if err != nil {
+		return 0
+	}
+	defer conn.Close()
+	conn.Ping()
+	d, err := conn.Ping()
+	if err != nil {
+		return 0
+	}
+	return d
+}
 
 // cmdSelftest times the three things a person notices: listing a folder,
 // opening a file for the first time, and opening it again. It works in a
@@ -112,6 +138,9 @@ func cmdSelftest(args []string) error {
 		FirstOpenOK   bool    `json:"first_open_within_3s"`
 		RepeatOpenOK  bool    `json:"repeat_open_within_500ms"`
 		EntriesListed int     `json:"entries_listed"`
+		// IndexMS is the time of one request to the index; 0 for a trial
+		// drive, which has no server.
+		IndexMS float64 `json:"index_request_ms"`
 	}
 	ms := func(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
 	res := result{Machine: cfg.Machine, Time: time.Now().UTC().Format(time.RFC3339),
@@ -119,6 +148,7 @@ func cmdSelftest(args []string) error {
 		Write100MS: ms(writeSmall), Write5MBMS: ms(writeBig),
 		ListingOK: listing <= 2*time.Second, FirstOpenOK: first <= 3*time.Second, RepeatOpenOK: again <= 500*time.Millisecond,
 		EntriesListed: len(entries)}
+	res.IndexMS = ms(indexRequest(cfg))
 	if *asJSON {
 		if err := printJSON(res); err != nil {
 			return err
@@ -136,6 +166,15 @@ func cmdSelftest(args []string) error {
 		fmt.Printf("  %s Open the same file again        %7.0f ms   (target: under 500)\n", mark(res.RepeatOpenOK), res.RepeatOpenMS)
 		fmt.Printf("    Save 100 small files            %7.0f ms\n", res.Write100MS)
 		fmt.Printf("    Save a 5 MB file                %7.0f ms\n", res.Write5MBMS)
+		if res.IndexMS > 0 {
+			fmt.Printf("    One request to the index        %7.0f ms\n", res.IndexMS)
+		}
+		if (!res.ListingOK || !res.FirstOpenOK || !res.RepeatOpenOK) && res.IndexMS > 150 {
+			fmt.Println()
+			fmt.Printf("The distance to the index is the cause: every request to it takes %.0f ms here, and listing a folder\n", res.IndexMS)
+			fmt.Println("or opening a file takes several. A VPN that sends traffic the long way round, or an index on another")
+			fmt.Println("continent, does this. Let connections to the index bypass the VPN, or run the index nearer.")
+		}
 	}
 	if !res.ListingOK || !res.FirstOpenOK || !res.RepeatOpenOK {
 		return exitCode(1)

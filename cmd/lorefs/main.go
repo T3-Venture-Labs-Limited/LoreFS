@@ -39,10 +39,19 @@ func commitUnix() int64 {
 const usage = `lorefs looks after the LoreFS shared drive on this computer.
 
 Getting connected
+  lorefs create               Make a new shared drive (or a trial one with --local)
   lorefs join                 Connect this computer to a drive, using a join code
   lorefs invite               Print a join code for another computer
   lorefs leave                Disconnect this computer (the drive itself is untouched)
   lorefs status               Show whether the drive is working, and what to do if not
+
+Running your own index
+  lorefs server init          Write a folder that runs the drive's index (Valkey) with Docker
+  lorefs admin changelog on|off|status   The drive's change log, which version history follows
+
+Backup and restore
+  lorefs backup setup|run|schedule|status   Keep a second copy of the files at another provider
+  lorefs restore-index        Rebuild the drive's index from a copy (--list, --drill, --from-backup)
 
 Earlier versions of a file
   lorefs history <file>       See a file's earlier versions and restore one
@@ -62,6 +71,7 @@ For agents
   lorefs sandbox create <folder> [name]   Make a private copy of a folder to work in
   lorefs sandbox list | diff <name> | apply <name> | remove <name>
   lorefs agents-snippet       Text to add to your agent instructions
+  lorefs rules diff           Compare the drive's rules file with this version's template
   lorefs containers on|off    Let containers on this computer use the drive
 
 Other
@@ -126,6 +136,12 @@ var commands map[string]func([]string) error
 
 func init() {
 	commands = map[string]func([]string) error{
+		"create":          cmdCreate,
+		"server":          cmdServer,
+		"admin":           cmdAdmin,
+		"rules":           cmdRules,
+		"backup":          cmdBackup,
+		"restore-index":   cmdRestoreIndex,
 		"join":            cmdJoin,
 		"invite":          cmdInvite,
 		"leave":           cmdLeave,
@@ -225,64 +241,24 @@ func cmdVersion([]string) error {
 func cmdUpdate(args []string) error {
 	fs := flags("update")
 	check := fs.Bool("check", false, "only say whether a newer version exists")
-	remember := fs.String("remember", "", "(used by the installer) the repository copy lorefs was installed from")
-	forget := fs.Bool("forget", false, "(used by the installer) lorefs was installed from a release file")
 	if _, err := parse(fs, args); err != nil {
 		return err
 	}
-	switch {
-	case *forget:
-		return update.Remember("")
-	case *remember != "":
-		return update.Remember(*remember)
-	}
-	dir, err := update.Source()
-	if err != nil {
-		fmt.Println("This computer's lorefs was installed from a release file, so it cannot")
-		fmt.Println("fetch a newer version by itself. Either unpack a newer release file and")
-		fmt.Println("run ./install.sh in it, or install once from the repository:")
-		fmt.Println()
-		fmt.Println("  git clone <repository address> && cd loreFS && make build && ./install.sh")
-		fmt.Println()
-		fmt.Println("After that, `lorefs update` does it all.")
-		return exitCode(1)
-	}
 	if !*check {
-		fmt.Printf("Looking for a newer version in %s ...\n", dir)
+		fmt.Println("Looking for a newer release...")
 	}
-	res, err := update.Run(update.Options{Dir: dir, Installed: version, CheckOnly: *check, Out: os.Stdout})
+	res, err := update.Run(context.Background(), update.Options{Installed: version, CheckOnly: *check, Out: os.Stdout})
 	if err != nil {
 		return err
 	}
-	show := func() {
-		for i, line := range res.Changes {
-			if i == 12 {
-				fmt.Printf("  ... and %d more\n", len(res.Changes)-i)
-				break
-			}
-			fmt.Println("  " + line)
-		}
-	}
 	switch {
-	case *check && len(res.Changes) > 0:
-		fmt.Printf("A newer version is available (%d change(s)). This computer runs lorefs %s.\n", len(res.Changes), version)
-		show()
-		fmt.Println("Install it with: lorefs update")
+	case res.Newer && *check:
+		fmt.Printf("A newer version is available: lorefs %s. This computer runs lorefs %s.\nInstall it with: lorefs update\n", res.Latest, version)
 		return exitCode(1)
-	case *check && version != res.From:
-		fmt.Printf("The repository copy is at %s but this computer runs lorefs %s. Install it with: lorefs update\n", res.From, version)
-		return exitCode(1)
-	case *check, !res.Installed:
+	case !res.Newer:
 		fmt.Printf("lorefs %s is the newest version.\n", version)
 	default:
-		fmt.Println()
-		if len(res.Changes) > 0 {
-			fmt.Printf("Updated lorefs from %s to %s:\n", version, res.To)
-			show()
-		} else {
-			fmt.Printf("Installed lorefs %s (the repository copy was already at that version).\n", res.To)
-		}
-		fmt.Println()
+		fmt.Printf("\nUpdated lorefs from %s to %s.\n", version, res.Latest)
 		fmt.Println("Version history and status use the new version from now on. The drive")
 		fmt.Println("itself switches at your next login; to switch now, close programs that")
 		fmt.Println("are using the drive and run: systemctl --user restart lorefs-mount")
@@ -352,6 +328,9 @@ func cmdSetupFiles(args []string) error {
 	changed, err := setup.InstallFiles()
 	if err != nil {
 		return err
+	}
+	if r := setup.Report(setup.DetectOptional(setup.RealProbe())); r != "" {
+		fmt.Fprint(os.Stderr, r)
 	}
 	if changed {
 		fmt.Println("service files updated")

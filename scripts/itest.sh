@@ -27,7 +27,7 @@ JFS="$ROOT/.tools/juicefs"
 export LOREFS_JUICEFS="$JFS"
 export LOREFS_NO_SYSTEMD=1 LOREFS_NO_NOTIFY=1
 export LOREFS_QUIET=300ms LOREFS_MAX_WAIT=20s LOREFS_JOURNAL_FLUSH=300ms
-export LOREFS_FOLLOW=2s LOREFS_LATE_IDLE=6s LOREFS_HEALTH=2s LOREFS_DOWN_AFTER=5s
+export LOREFS_FOLLOW=2s LOREFS_HEALTH=2s LOREFS_DOWN_AFTER=5s
 
 PASS=0; FAIL=0; FAILED=()
 ok()   { PASS=$((PASS+1)); printf '  \033[32m✓\033[0m %s\n' "$1"; }
@@ -175,11 +175,12 @@ sleep 1; echo "second draft" >"$A/notes/plan.md"
 within 10 eval '[ "$(versions alpha notes/plan.md)" = 2 ]' && ok "a changed file gets a second version" || bad "a changed file gets a second version"
 old=$(lore_a open --path notes/plan.md 2)
 [ "$(cat "$old")" = "first draft" ] && ok "the earlier version holds the earlier content" || bad "the earlier version holds the earlier content"
-# Under --all-squash JuiceFS itself checks the file's mode, and its open cache
-# (2 s) can let a writer through that was let in just before the file was made
-# read-only. Wait out the cache; see docs/design-notes/squash.md.
-sleep 3
-refute "a version cannot be modified" sh -c "echo x >> '$old'"
+# Under --all-squash JuiceFS itself checks the file's mode, and its open
+# cache lets a program write to a file that this computer has recently opened,
+# whatever the mode (see docs/design-notes/squash.md). So the check is made on
+# the other computer, which has not touched the file.
+[ "$(stat -c %a "$old")" = 444 ] && ok "a version is stored read-only (mode 444)" || bad "a version is stored read-only (mode 444)"
+refute "a version cannot be modified from another computer" sh -c "echo x >> '${old/$A/$B}'"
 within 5 eval '[ "$(versions beta notes/plan.md)" = 2 ]' && ok "beta sees the same history" || bad "beta sees the same history"
 lore_a history --list notes/plan.md | grep -q "alpha" && ok "the list shows time, computer and size" || bad "the list shows time, computer and size"
 lore_a history "$A/AGENTS.md" >/dev/null 2>&1; check "history works with an absolute path" lore_a history --list "$A/notes/plan.md"
@@ -294,9 +295,9 @@ echo "$all" | grep -q "from alpha" && echo "$all" | grep -q "from beta" && ok "b
 lore_a history --json both.md | jq -r '.versions[].machine' | sort -u | tr '\n' ' ' | grep -q "alpha beta" \
   && ok "each version names the computer that saved it" || bad "each version names the computer that saved it"
 
-# A folder made on one computer and used on the other. A computer only
-# sees changes made through its own mount, so it has to be told about
-# folders the other one creates or renames.
+# A folder made on one computer and used on the other. Each computer records
+# its own saves from the drive's change log, so a folder the other one made or
+# renamed needs no introduction: the edit is recorded in the normal time.
 mkdir -p "$A/made-on-alpha/sub"; echo "v1 from alpha" >"$A/made-on-alpha/sub/doc.md"
 within 10 eval '[ "$(versions alpha made-on-alpha/sub/doc.md)" = 1 ]'; sleep 5
 cat "$B/made-on-alpha/sub/doc.md" >/dev/null; echo "v2 from beta" >"$B/made-on-alpha/sub/doc.md"
@@ -306,17 +307,19 @@ within 10 eval '[ "$(versions alpha made-on-alpha/sub/doc.md)" = 2 ]' \
 mkdir "$A/rush"; within 5 test -d "$B/rush"; echo "written by beta at once" >"$B/rush/first.md"
 within 30 eval '[ "$(versions alpha rush/first.md)" = 1 ]' \
   && [ "$(lore_a history --json rush/first.md | jq -r '.versions[0].machine')" = beta ] \
-  && ok "a file saved on beta before it was told about the new folder is still recorded" || bad "a file saved on beta before it was told about the new folder is still recorded"
+  && ok "a file saved on beta right after alpha made its folder is recorded" || bad "a file saved on beta right after alpha made its folder is recorded"
 mv "$A/made-on-alpha" "$A/renamed-on-alpha"; sleep 5
 echo "v3 from beta" >"$B/renamed-on-alpha/sub/doc.md"
 within 10 eval '[ "$(versions alpha renamed-on-alpha/sub/doc.md)" = 3 ]' \
   && ok "after alpha renames the folder, an edit on beta is recorded under the new name" || bad "after alpha renames the folder, an edit on beta is recorded under the new name" "$(versions alpha renamed-on-alpha/sub/doc.md)"
-rm -r "$A/rush"; sleep 3; mkdir "$A/rush"; echo "second life" >"$A/rush/again.md"; within 10 eval '[ "$(versions alpha rush/again.md)" = 1 ]'; sleep 5
+# The other computer remembers folder contents for up to 10 s (folder_cache_sec), so it
+# needs that long before it can open a file in a folder that was just made again.
+rm -r "$A/rush"; sleep 3; mkdir "$A/rush"; echo "second life" >"$A/rush/again.md"; within 10 eval '[ "$(versions alpha rush/again.md)" = 1 ]'; sleep 12
 cat "$B/rush/again.md" >/dev/null; echo "edited by beta" >"$B/rush/again.md"
 within 10 eval '[ "$(versions alpha rush/again.md)" = 2 ]' \
   && ok "a folder deleted and made again on alpha is still followed on beta" || bad "a folder deleted and made again on alpha is still followed on beta" "$(versions alpha rush/again.md)"
 [ "$(lore_a log --json -n 2000 | jq '[.[] | select(.op == "mkdir" or .op == "mvdir")] | length')" = 0 ] \
-  && ok "the notes computers leave each other about folders stay out of the activity log" || bad "folder notes stay out of the activity log"
+  && ok "the activity log holds no folder notes" || bad "the activity log holds no folder notes"
 
 # Activity log.
 log=$(lore_a log -n 200)

@@ -1,173 +1,168 @@
 package update
 
 import (
+	"archive/tar"
 	"bytes"
-	"errors"
+	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// repo makes a small "origin" repository whose build and installer only
-// write down that they ran, and a copy of it as a computer would have.
-func repo(t *testing.T) (origin, clone string) {
-	t.Helper()
-	for _, tool := range []string{"git", "make", "go"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			t.Skipf("%s is not installed", tool)
+func TestNewer(t *testing.T) {
+	cases := []struct {
+		installed, candidate string
+		want                 bool
+	}{
+		{"v0.1.0", "0.2.0", true},
+		{"0.2.0", "0.2.0", false},
+		{"v0.2.0", "0.1.9", false},
+		{"v0.9.0", "0.10.0", true},
+		{"v1.0.0-rc.1", "1.0.0", true},
+		{"v1.0.0", "1.0.0-rc.2", false},
+		{"v1.0.0-rc.2", "1.0.0-rc.10", true},
+		{"dev", "0.1.0", true},
+		{"68b8873-dirty", "0.1.0", true},
+		{"v0.2.0-3-gabc1234", "0.2.0", false}, // built after the tag: not offered that tag
+		{"v0.2.0-3-gabc1234-dirty", "0.3.0", true},
+		{"v0.2.0", "not-a-version", false},
+	}
+	for _, c := range cases {
+		if got := Newer(c.installed, c.candidate); got != c.want {
+			t.Errorf("Newer(%q, %q) = %v, want %v", c.installed, c.candidate, got, c.want)
 		}
 	}
-	base := t.TempDir()
-	origin, clone = filepath.Join(base, "origin"), filepath.Join(base, "clone")
-	os.MkdirAll(origin, 0o755)
-	run(t, origin, "git", "init", "-q", "-b", "main")
-	write(t, origin, "Makefile", "build:\n\t@echo built >> build.log\n")
-	write(t, origin, "install.sh", "#!/bin/sh\necho installed >> install.log\n")
-	os.Chmod(filepath.Join(origin, "install.sh"), 0o755)
-	write(t, origin, ".gitignore", "*.log\n")
-	commit(t, origin, "first version")
-	run(t, base, "git", "clone", "-q", origin, clone)
-	return origin, clone
 }
 
-func run(t *testing.T, dir string, name string, args ...string) string {
+func hash(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
+
+func TestParseSums(t *testing.T) {
+	sums := strings.Join([]string{
+		hash("a") + "  lorefs-0.2.0-linux-amd64.tar.gz",
+		hash("b") + "  lorefs-0.2.0-linux-arm64.tar.gz",
+		hash("c") + "  lorefs-0.10.0-linux-amd64.tar.gz",
+		hash("d") + "  install.sh",
+		"garbage line",
+	}, "\n")
+	r, err := ParseSums(sums, "amd64")
+	if err != nil || r.Version != "0.10.0" || r.SHA256 != hash("c") {
+		t.Fatalf("%+v %v", r, err)
+	}
+	if r, err = ParseSums(sums, "arm64"); err != nil || r.Version != "0.2.0" {
+		t.Fatalf("%+v %v", r, err)
+	}
+	if _, err = ParseSums("", "amd64"); err == nil {
+		t.Fatal("an empty list has no archive")
+	}
+}
+
+// release builds a .tar.gz whose installer writes a marker file.
+func release(t *testing.T, version, marker string) []byte {
 	t.Helper()
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
-		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s %v: %v\n%s", name, args, err, out)
-	}
-	return strings.TrimSpace(string(out))
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	top := "lorefs-" + version + "-linux-amd64"
+	tw.WriteHeader(&tar.Header{Name: top + "/", Typeflag: tar.TypeDir, Mode: 0o755})
+	script := "#!/bin/sh\necho installed " + version + " >> '" + marker + "'\n"
+	tw.WriteHeader(&tar.Header{Name: top + "/install.sh", Typeflag: tar.TypeReg, Mode: 0o755, Size: int64(len(script))})
+	tw.Write([]byte(script))
+	tw.Close()
+	gz.Close()
+	return buf.Bytes()
 }
 
-func write(t *testing.T, dir, name, body string) {
+func serve(t *testing.T, files map[string][]byte) *httptest.Server {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, ok := files[strings.TrimPrefix(r.URL.Path, "/")]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write(data)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestUpdateInstallsANewerRelease(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "marker")
+	arch := release(t, "0.2.0", marker)
+	srv := serve(t, map[string][]byte{
+		"SHA256SUMS":                      []byte(hash(string(arch)) + "  lorefs-0.2.0-linux-amd64.tar.gz\n"),
+		"lorefs-0.2.0-linux-amd64.tar.gz": arch,
+	})
+	var out bytes.Buffer
+	res, err := Run(context.Background(), Options{Installed: "v0.1.0", Base: srv.URL, Out: &out, Arch: "amd64"})
+	if err != nil || !res.Done || res.Latest != "0.2.0" {
+		t.Fatalf("%+v %v\n%s", res, err, out.String())
+	}
+	if data, _ := os.ReadFile(marker); !strings.Contains(string(data), "installed 0.2.0") {
+		t.Fatalf("the installer did not run: %q", data)
 	}
 }
 
-func commit(t *testing.T, dir, msg string) string {
-	t.Helper()
-	run(t, dir, "git", "add", "-A")
-	run(t, dir, "git", "-c", "commit.gpgsign=false", "commit", "-q", "-m", msg)
-	return run(t, dir, "git", "rev-parse", "--short", "HEAD")
-}
-
-func ran(dir, log string) int {
-	data, _ := os.ReadFile(filepath.Join(dir, log))
-	return strings.Count(string(data), "\n")
-}
-
-func TestNothingNewDoesNothing(t *testing.T) {
-	_, clone := repo(t)
-	head := run(t, clone, "git", "rev-parse", "--short", "HEAD")
-	res, err := Run(Options{Dir: clone, Installed: head, Out: &bytes.Buffer{}})
-	if err != nil || res.Installed || len(res.Changes) != 0 {
-		t.Fatalf("expected nothing to do: %+v, %v", res, err)
+func TestUpdateCheckOnlyChangesNothing(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "marker")
+	arch := release(t, "0.2.0", marker)
+	srv := serve(t, map[string][]byte{"SHA256SUMS": []byte(hash(string(arch)) + "  lorefs-0.2.0-linux-amd64.tar.gz\n"), "lorefs-0.2.0-linux-amd64.tar.gz": arch})
+	res, err := Run(context.Background(), Options{Installed: "v0.1.0", CheckOnly: true, Base: srv.URL, Arch: "amd64"})
+	if err != nil || !res.Newer || res.Done {
+		t.Fatalf("%+v %v", res, err)
 	}
-	if ran(clone, "build.log") != 0 {
-		t.Fatal("the build ran although nothing was new")
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("--check must not install")
 	}
 }
 
-func TestInstalledOlderThanTheCopyIsInstalled(t *testing.T) {
-	_, clone := repo(t)
-	res, err := Run(Options{Dir: clone, Installed: "0000000", Out: &bytes.Buffer{}})
-	if err != nil || !res.Installed || ran(clone, "build.log") != 1 || ran(clone, "install.log") != 1 {
-		t.Fatalf("the copy's version should have been built and installed: %+v, %v", res, err)
+func TestAlreadyNewest(t *testing.T) {
+	srv := serve(t, map[string][]byte{"SHA256SUMS": []byte(hash("x") + "  lorefs-0.2.0-linux-amd64.tar.gz\n")})
+	res, err := Run(context.Background(), Options{Installed: "v0.2.0", Base: srv.URL, Arch: "amd64"})
+	if err != nil || res.Newer || res.Done {
+		t.Fatalf("%+v %v", res, err)
 	}
 }
 
-func TestNewChangesAreFetchedBuiltAndInstalled(t *testing.T) {
-	origin, clone := repo(t)
-	old := run(t, clone, "git", "rev-parse", "--short", "HEAD")
-	write(t, origin, "notes.txt", "one\n")
-	commit(t, origin, "second version")
-	write(t, origin, "notes.txt", "two\n")
-	newest := commit(t, origin, "third version")
-
-	// --check reports and changes nothing.
-	res, err := Run(Options{Dir: clone, Installed: old, CheckOnly: true, Out: &bytes.Buffer{}})
-	if err != nil || len(res.Changes) != 2 || res.Installed || res.To != newest {
-		t.Fatalf("check: %+v, %v", res, err)
-	}
-	if got := run(t, clone, "git", "rev-parse", "--short", "HEAD"); got != old || ran(clone, "build.log") != 0 {
-		t.Fatalf("check must not change anything (at %s)", got)
-	}
-
-	res, err = Run(Options{Dir: clone, Installed: old, Out: &bytes.Buffer{}})
-	if err != nil || !res.Installed || res.To != newest || len(res.Changes) != 2 {
-		t.Fatalf("update: %+v, %v", res, err)
-	}
-	if !strings.Contains(res.Changes[0], "third version") {
-		t.Fatalf("newest change first, got %q", res.Changes)
-	}
-	if ran(clone, "build.log") != 1 || ran(clone, "install.log") != 1 {
-		t.Fatal("build and installer should each have run once")
+func TestUnreachableServerChangesNothing(t *testing.T) {
+	srv := serve(t, nil)
+	srv.Close()
+	_, err := Run(context.Background(), Options{Installed: "v0.1.0", Base: srv.URL, Arch: "amd64"})
+	if err == nil || !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("got %v", err)
 	}
 }
 
-// The first computers were told to `git checkout <version>`, which
-// leaves the copy on no branch; a plain `git pull` fails there.
-func TestACopyPinnedToOneVersionMovesToTheMainBranch(t *testing.T) {
-	origin, clone := repo(t)
-	old := run(t, clone, "git", "rev-parse", "--short", "HEAD")
-	run(t, clone, "git", "checkout", "-q", old) // detached
-	write(t, origin, "notes.txt", "one\n")
-	newest := commit(t, origin, "second version")
-
-	res, err := Run(Options{Dir: clone, Installed: old, Out: &bytes.Buffer{}})
-	if err != nil || !res.Installed || res.To != newest {
-		t.Fatalf("update from a pinned copy: %+v, %v", res, err)
+func TestCorruptedArchiveIsNotInstalled(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "marker")
+	arch := release(t, "0.2.0", marker)
+	corrupt := append([]byte(nil), arch...)
+	corrupt[len(corrupt)/2] ^= 0xff
+	srv := serve(t, map[string][]byte{"SHA256SUMS": []byte(hash(string(arch)) + "  lorefs-0.2.0-linux-amd64.tar.gz\n"), "lorefs-0.2.0-linux-amd64.tar.gz": corrupt})
+	res, err := Run(context.Background(), Options{Installed: "v0.1.0", Base: srv.URL, Arch: "amd64"})
+	if err == nil || !strings.Contains(err.Error(), "does not match") || res.Done {
+		t.Fatalf("%+v %v", res, err)
 	}
-	if b := run(t, clone, "git", "symbolic-ref", "--short", "HEAD"); b != "main" {
-		t.Fatalf("the copy should be on main now, is on %q", b)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a corrupted archive must not run its installer")
 	}
 }
 
-func TestACopyWithItsOwnConflictingChangesIsLeftAlone(t *testing.T) {
-	origin, clone := repo(t)
-	old := run(t, clone, "git", "rev-parse", "--short", "HEAD")
-	write(t, clone, "notes.txt", "mine\n")
-	commit(t, clone, "a change of my own")
-	write(t, origin, "notes.txt", "theirs\n")
-	commit(t, origin, "second version")
-
-	res, err := Run(Options{Dir: clone, Installed: old, Out: &bytes.Buffer{}})
-	if err == nil || res.Installed || !strings.Contains(err.Error(), "left alone") {
-		t.Fatalf("expected a refusal: %+v, %v", res, err)
-	}
-	if ran(clone, "build.log") != 0 {
-		t.Fatal("nothing should have been built")
-	}
-}
-
-func TestRememberAndSource(t *testing.T) {
-	_, clone := repo(t)
-	t.Setenv("LOREFS_CONFIG_DIR", filepath.Join(t.TempDir(), "config"))
-	if _, err := Source(); !errors.Is(err, ErrNoSource) {
-		t.Fatalf("nothing remembered yet: %v", err)
-	}
-	if err := Remember(clone); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := Source(); err != nil || got != clone {
-		t.Fatalf("Source() = %q, %v", got, err)
-	}
-	os.RemoveAll(filepath.Join(clone, ".git"))
-	if _, err := Source(); !errors.Is(err, ErrNoSource) {
-		t.Fatalf("a copy that is gone is no source: %v", err)
-	}
-	if err := Remember(""); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(SourceFile()); !os.IsNotExist(err) {
-		t.Fatal("forgetting should remove the note")
+func TestUnsafeArchiveIsRefused(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	tw.WriteHeader(&tar.Header{Name: "../evil", Typeflag: tar.TypeReg, Mode: 0o644, Size: 1})
+	tw.Write([]byte("x"))
+	tw.Close()
+	gz.Close()
+	if _, err := extract(buf.Bytes(), t.TempDir()); err == nil {
+		t.Fatal("a path outside the folder must be refused")
 	}
 }

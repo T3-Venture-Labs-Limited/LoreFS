@@ -62,6 +62,31 @@ type Store struct {
 	// moment; without this, two of them would each find no version of the
 	// current content and each make one.
 	recording [64]sync.Mutex
+
+	// The newest version this process made of each file. A folder read
+	// can lag behind what was just made (the mount remembers folder
+	// contents for a few seconds, and a version made by `juicefs clone`
+	// does not pass through the mount), so a second request for a file
+	// that arrives right behind the first would not find its version and
+	// make another. Remembering it here prevents that.
+	lastMu sync.Mutex
+	last   map[string]Version
+}
+
+func (s *Store) lastVersion(rel string) (Version, bool) {
+	s.lastMu.Lock()
+	defer s.lastMu.Unlock()
+	v, ok := s.last[rel]
+	return v, ok
+}
+
+func (s *Store) setLastVersion(rel string, v Version) {
+	s.lastMu.Lock()
+	defer s.lastMu.Unlock()
+	if s.last == nil || len(s.last) > 16384 {
+		s.last = map[string]Version{}
+	}
+	s.last[rel] = v
 }
 
 // New returns a Store with the default retention and skip list.
@@ -226,6 +251,11 @@ func (s *Store) record(rel, op string) (*Version, error) {
 	if err != nil {
 		return nil, err
 	}
+	if lv, ok := s.lastVersion(rel); ok && (len(versions) == 0 || lv.Name > versions[0].Name) {
+		if _, err := os.Lstat(lv.Path); err == nil {
+			versions = append([]Version{lv}, versions...) // made by this process, not listed yet
+		}
+	}
 	if len(versions) > 0 && versions[0].Size == st.Size() {
 		if sameMoment(versions[0].ModTime, st.ModTime()) {
 			os.Remove(filepath.Join(dir, deletedMarker)) // the file exists again
@@ -276,6 +306,7 @@ func (s *Store) record(rel, op string) (*Version, error) {
 	os.Remove(filepath.Join(dir, deletedMarker))
 	v := &Version{Name: name, Path: dst, Time: now, Machine: s.Machine, Size: st.Size(), ModTime: st.ModTime()}
 	s.Journal.Append(Event{Time: now, Op: op, Path: filepath.ToSlash(rel), Size: st.Size(), Version: name})
+	s.setLastVersion(rel, *v)
 	return v, nil
 }
 

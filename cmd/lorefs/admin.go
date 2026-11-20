@@ -1,12 +1,17 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/config"
+	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/create"
 	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/index"
+	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/jfs"
+	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/mount"
 	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/status"
 	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/token"
 )
@@ -99,6 +104,53 @@ func cmdIndexCheck(args []string) error {
 		fmt.Printf("holds the drive %q\n", name)
 	} else {
 		fmt.Println("holds no drive yet")
+	}
+	return nil
+}
+
+// cmdAdmin holds the few settings of the drive itself that a person may
+// need to change.
+func cmdAdmin(args []string) error {
+	const use = "use: lorefs admin changelog on|off|status"
+	if len(args) < 1 || args[0] != "changelog" {
+		return errUsage(use)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	var env []string
+	if !cfg.IsLocal() {
+		pw, err := config.Password()
+		if err != nil {
+			return err
+		}
+		env = []string{"META_PASSWORD=" + pw}
+	}
+	if len(args) == 2 && args[1] == "status" {
+		ds, err := jfs.NewExec().Status(context.Background(), mount.IndexURL(cfg), strings.TrimPrefix(strings.Join(env, ""), "META_PASSWORD="))
+		if err != nil {
+			return err
+		}
+		if ds.ChangeLog {
+			fmt.Printf("The change log is on: it keeps %s of changes (up to %d entries).\n", status.Age(ds.ChangeLogMaxAge), ds.ChangeLogMaxLines)
+		} else {
+			fmt.Println("The change log is off. Versions are recorded by a periodic walk of the changed files.")
+		}
+		return nil
+	}
+	if len(args) != 2 || (args[1] != "on" && args[1] != "off") {
+		return errUsage(use)
+	}
+	on := args[1] == "on"
+	if err := create.SetChangeLog(context.Background(), nil, mount.IndexURL(cfg), env, on); err != nil {
+		return err
+	}
+	if on {
+		fmt.Println("The change log is on. Within a few minutes every computer follows it to record versions as they happen.")
+	} else {
+		fmt.Println("The change log is off. Versions are recorded by a periodic walk, up to ten minutes after a save.")
+		fmt.Println("Turn it on again with: lorefs admin changelog on")
 	}
 	return nil
 }

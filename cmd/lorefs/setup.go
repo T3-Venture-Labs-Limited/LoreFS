@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/config"
+	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/create"
 	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/setup"
 	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/token"
 	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/ui"
@@ -30,6 +31,10 @@ func cmdJoin(args []string) error {
 		fmt.Printf("This computer has already joined the drive %q at %s. Nothing was changed.\n", cfg.DriveName, cfg.Folder)
 		fmt.Println("To connect to a different drive, run `lorefs leave` first.")
 		return nil
+	}
+	if err := setup.CheckSession(); err != nil {
+		fmt.Fprintf(os.Stderr, "%v.\n\n%s\n", err, setup.NoSessionAdvice)
+		return exitCode(1)
 	}
 
 	var code string
@@ -103,6 +108,12 @@ func cmdInvite(args []string) error {
 		return err
 	}
 	code, err := setup.Invite()
+	if errors.Is(err, token.ErrTrialDrive) {
+		fmt.Println("This is a trial drive: it lives on this computer only, so there is no join code.")
+		fmt.Println("To share files with other computers, create a shared drive with `lorefs create`")
+		fmt.Println("(see the documentation for what you need: a bucket and an index).")
+		return exitCode(1)
+	}
 	if err != nil {
 		return err
 	}
@@ -124,6 +135,7 @@ func cmdLeave(args []string) error {
 	fs := flags("leave")
 	yes := fs.Bool("yes", false, "do not ask for confirmation")
 	deleteCache := fs.Bool("delete-cache", false, "also delete the local cache")
+	deleteDrive := fs.Bool("delete-drive", false, "also delete the drive itself (trial drives only)")
 	keepCache := fs.Bool("keep-cache", false, "keep the local cache without asking")
 	if _, err := parse(fs, args); err != nil {
 		return err
@@ -131,6 +143,18 @@ func cmdLeave(args []string) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
+	}
+	if *deleteDrive && !cfg.IsLocal() {
+		return errors.New("--delete-drive only works on a trial drive. A shared drive belongs to everyone who uses it; " +
+			"delete its bucket and index yourself if you are sure")
+	}
+	if *deleteDrive && !*yes {
+		fmt.Printf("This DELETES the trial drive %q and every file in it, for good.\n", cfg.DriveName)
+		if !ui.Confirm("Delete the trial drive?") {
+			fmt.Println("Nothing was changed.")
+			return nil
+		}
+		*yes = true
 	}
 	if !*yes {
 		fmt.Printf("This disconnects this computer from the shared drive %q.\n", cfg.DriveName)
@@ -144,8 +168,15 @@ func cmdLeave(args []string) error {
 	if !drop && !*keepCache && !*yes {
 		drop = ui.Confirm(fmt.Sprintf("Also delete the local cache in %s to free disk space?", cfg.CacheDir))
 	}
-	if err := setup.Leave(drop); err != nil {
+	if err := setup.Leave(drop || *deleteDrive); err != nil {
 		return err
+	}
+	if *deleteDrive {
+		if err := create.RemoveLocal(cfg); err != nil {
+			return err
+		}
+		fmt.Println("The trial drive was deleted.")
+		return nil
 	}
 	fmt.Println("This computer is disconnected from the drive. To connect again you need a new join code.")
 	return nil

@@ -48,6 +48,36 @@ func extensionFile() string {
 
 func noSystemd() bool { return os.Getenv("LOREFS_NO_SYSTEMD") != "" }
 
+// ErrNoSession is returned when this computer has no systemd user session
+// to keep the drive connected with.
+var ErrNoSession = errors.New("this computer has no systemd user session")
+
+// CheckSession makes sure the drive can be kept connected: LoreFS runs its
+// mount and helper as systemd user services. It changes nothing.
+func CheckSession() error {
+	if noSystemd() {
+		return nil
+	}
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return fmt.Errorf("%w (the program systemctl was not found)", ErrNoSession)
+	}
+	if out, err := exec.Command("systemctl", "--user", "show-environment").CombinedOutput(); err != nil {
+		return fmt.Errorf("%w (%s)", ErrNoSession, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// NoSessionAdvice explains what to do about ErrNoSession.
+const NoSessionAdvice = `LoreFS keeps the drive connected with two systemd user services, so it needs a
+computer where you are logged in to a systemd user session (a normal Linux
+desktop, or a server where you logged in with a login shell). Nothing was
+changed on this computer.
+
+In a container or a minimal environment there is no such session. You can
+still use LoreFS's commands that do not need it, or run the mount by hand:
+  lorefs mount run     keeps the drive connected while it runs
+  lorefs helper run    records versions while it runs`
+
 func systemctl(args ...string) error {
 	if noSystemd() {
 		return nil
@@ -89,8 +119,11 @@ func InstallFiles() (unitsChanged bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	if _, err := writeIfChanged(extensionFile(), assets.NautilusExtension, 0o644); err != nil {
-		return false, err
+	// The file-manager entry only where the file manager can use it.
+	if found(DetectOptional(RealProbe()), PieceFileManager) {
+		if _, err := writeIfChanged(extensionFile(), assets.NautilusExtension, 0o644); err != nil {
+			return false, err
+		}
 	}
 	if a || b {
 		if err := systemctl("daemon-reload"); err != nil {
@@ -166,45 +199,63 @@ func Join(opt JoinOptions) (config.Config, error) {
 		return cfg, fmt.Errorf("the folder %s already exists and is not empty; choose another with --folder", cfg.Folder)
 	}
 
-	// From here on the machine is changed.
-	if tok.TLS {
-		if err := config.WritePrivate(config.CAFile(), []byte(tok.CA)); err != nil {
-			return cfg, err
+	return cfg, Connect(cfg, tok.Password, []byte(tok.CA), say)
+}
+
+// Connect saves the settings of a drive on this computer, installs the
+// services and waits for the folder to appear. password and ca are empty
+// for a drive that needs neither (a trial drive, or an index whose
+// certificate comes from a public authority).
+func Connect(cfg config.Config, password string, ca []byte, say func(string)) error {
+	if say == nil {
+		say = func(string) {}
+	}
+	if len(ca) > 0 {
+		if err := config.WritePrivate(config.CAFile(), ca); err != nil {
+			return err
 		}
 	}
-	if err := config.SavePassword(tok.Password); err != nil {
-		return cfg, err
+	if password != "" {
+		if err := config.SavePassword(password); err != nil {
+			return err
+		}
 	}
 	if err := cfg.Save(); err != nil {
-		return cfg, err
+		return err
 	}
 	if err := os.MkdirAll(cfg.Folder, 0o700); err != nil {
-		return cfg, err
+		return err
 	}
 	if !jfs.IsMounted(cfg.Folder) {
 		os.Chmod(cfg.Folder, 0o500) // read-only until the drive is mounted on it
 	}
 	if noSystemd() {
-		return cfg, nil
+		return nil
 	}
 	if _, err := InstallFiles(); err != nil {
-		return cfg, err
+		return err
 	}
-	if err := addBookmark(cfg.Folder); err != nil {
-		say("Could not add the file-manager sidebar entry: " + err.Error())
+	pieces := DetectOptional(RealProbe())
+	if found(pieces, PieceBookmarks) {
+		if err := addBookmark(cfg.Folder); err != nil {
+			say("Could not add the file-manager sidebar entry: " + err.Error())
+		}
+	}
+	if r := Report(pieces); r != "" {
+		say(strings.TrimRight(r, "\n"))
 	}
 	say("Connecting the drive...")
 	if err := systemctl("enable", "--now", mountUnit, helperUnit); err != nil {
-		return cfg, err
+		return err
 	}
 	deadline := time.Now().Add(2 * time.Minute)
 	for !jfs.IsMounted(cfg.Folder) {
 		if time.Now().After(deadline) {
-			return cfg, errors.New("the drive did not connect within 2 minutes; run `lorefs status` to see why")
+			return errors.New("the drive did not connect within 2 minutes; run `lorefs status` to see why")
 		}
 		time.Sleep(time.Second)
 	}
-	return cfg, nil
+	return nil
 }
 
 // Invite builds a join token from this machine's settings.

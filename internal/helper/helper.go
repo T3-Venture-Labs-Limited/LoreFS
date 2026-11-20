@@ -29,7 +29,7 @@ import (
 	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/jfs"
 	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/mount"
 	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/peers"
-	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/watch"
+	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/record"
 )
 
 // Heartbeat is what the helper writes for `lorefs status` to read.
@@ -38,9 +38,15 @@ type Heartbeat struct {
 	Time        time.Time `json:"time"`
 	Started     time.Time `json:"started"`
 	LastVersion time.Time `json:"last_version"`
-	Watched     int       `json:"watched_folders"`
-	// Ready is false while the helper is still looking at every folder
-	// after starting. Saves made meanwhile are recorded once it is ready.
+	// LogVersion is the last change-log entry read, and LogEntries how many
+	// were read since the helper started. ChangeLog says whether the
+	// drive's change log is on; when it is off, versions come from the
+	// periodic walk only.
+	LogVersion int64 `json:"log_version"`
+	LogEntries int64 `json:"log_entries"`
+	ChangeLog  bool  `json:"change_log"`
+	// Ready is false while the helper is still starting. Saves made
+	// meanwhile are recorded once it is ready.
 	Ready     bool      `json:"ready"`
 	LastWalk  time.Time `json:"last_walk"`
 	LastPrune time.Time `json:"last_prune"`
@@ -66,14 +72,14 @@ func ReadHeartbeat() (Heartbeat, bool) {
 // test shorten them through environment variables.
 type Timings struct {
 	Quiet, MaxWait time.Duration
+	LongQuiet      time.Duration // quiet time after a write that filled a slice
 	JournalFlush   time.Duration
 	Follow         time.Duration // read other machines' journals
-	LateIdle       time.Duration // other machines quiet this long before late checks
-	LateMax        time.Duration // a late check waits at most this long
 	Walk           time.Duration // catch-up walk
+	WalkNoLog      time.Duration // catch-up walk when the drive has no change log
+	LogCheck       time.Duration // look again at the drive's change-log setting
 	Health         time.Duration
 	DownAfter      time.Duration // unhealthy this long before notifying
-	StartProgress  time.Duration // say how far the start is, this often
 }
 
 func envDuration(name string, def time.Duration) time.Duration {
@@ -98,13 +104,17 @@ func DefaultTimings() Timings {
 		MaxWait:      envDuration("LOREFS_MAX_WAIT", 5*time.Minute),
 		JournalFlush: envDuration("LOREFS_JOURNAL_FLUSH", 2*time.Second),
 		Follow:       envDuration("LOREFS_FOLLOW", 10*time.Second),
-		LateIdle:     envDuration("LOREFS_LATE_IDLE", 30*time.Second),
-		LateMax:      envDuration("LOREFS_LATE_MAX", 10*time.Minute),
-		Walk:         envDuration("LOREFS_WALK", 6*time.Hour),
-		Health:       envDuration("LOREFS_HEALTH", time.Minute),
-		DownAfter:    envDuration("LOREFS_DOWN_AFTER", 2*time.Minute),
-
-		StartProgress: envDuration("LOREFS_START_PROGRESS", 15*time.Second),
+		// A write that fills a 64 MiB slice may be followed by more. The
+		// recorder does not wait longer for it by default: a file that is
+		// still being written is not recorded anyway (its size on the drive
+		// is ahead of what has been committed), and one that is complete
+		// is recorded at once. The option stays for slow storage.
+		LongQuiet: envDuration("LOREFS_LONG_QUIET", 500*time.Millisecond),
+		Walk:      envDuration("LOREFS_WALK", 6*time.Hour),
+		WalkNoLog: envDuration("LOREFS_WALK_NO_LOG", 10*time.Minute),
+		LogCheck:  envDuration("LOREFS_LOG_CHECK", 5*time.Minute),
+		Health:    envDuration("LOREFS_HEALTH", time.Minute),
+		DownAfter: envDuration("LOREFS_DOWN_AFTER", 2*time.Minute),
 	}
 }
 
@@ -123,7 +133,8 @@ type helper struct {
 	healthy     bool
 	ready       bool
 	walkNow     chan struct{}
-	watcher     *watch.Watcher
+	recorder    *record.Recorder
+	changeLog   bool
 }
 
 // Program is the version of lorefs that is running, set by the command
@@ -155,9 +166,14 @@ func Run(ctx context.Context, cfg config.Config) error {
 	h.lastWalk = h.loadLastWalk()
 	h.writeHeartbeat() // alive and starting, before anything that waits for the index
 
-	if err := EnsureDrive(cfg); err != nil {
-		logger.Printf("preparing the drive: %v", err)
-	}
+	// Writing the rules file and the bookkeeping folders is a few dozen
+	// requests to the index: half a minute on a slow connection. Nothing
+	// waits for it, and the helper stops at once when asked.
+	go func() {
+		if err := EnsureDrive(cfg); err != nil {
+			logger.Printf("preparing the drive: %v", err)
+		}
+	}()
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -168,45 +184,13 @@ func Run(ctx context.Context, cfg config.Config) error {
 	// work for this computer, so many can run side by side. With 4, a
 	// 2,000-file import was still being recorded 13 minutes after the
 	// copy had finished.
-	h.watcher = watch.New(cfg.Folder, skip, h, watch.Options{Quiet: h.t.Quiet, MaxWait: h.t.MaxWait, Workers: 12})
-	ready := make(chan struct{})
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := h.watcher.Run(ctx, ready); err != nil {
-			errc <- fmt.Errorf("watching the drive: %w", err)
-		}
-	}()
-	// Looking at every folder takes a few seconds on a nearby index and
-	// minutes on a slow connection. Say that the helper is alive and how
-	// far it is, and stop at once when asked to.
-	h.writeHeartbeat()
-	progress := time.NewTicker(h.t.StartProgress)
-	for waiting := true; waiting; {
-		select {
-		case <-ready:
-			waiting = false
-		case <-ctx.Done():
-			waiting = false
-		case err := <-errc:
-			progress.Stop()
-			cancel()
-			wg.Wait()
-			return err
-		case <-progress.C:
-			logger.Printf("still starting: %d folders looked at so far (this is slow when the connection to the index is slow)", h.watcher.Watched())
-			h.writeHeartbeat()
-		}
-	}
-	progress.Stop()
-	if ctx.Err() != nil {
-		wg.Wait()
-		return nil // stopped before it was ready
-	}
 	h.mu.Lock()
 	h.ready = true
 	h.mu.Unlock()
-	logger.Printf("recording versions for %s as %q, watching %d folders", cfg.Folder, cfg.Machine, h.watcher.Watched())
+	h.writeHeartbeat()
+	wg.Add(1)
+	go func() { defer wg.Done(); h.recordLoop(ctx) }()
+	logger.Printf("recording versions for %s as %q", cfg.Folder, cfg.Machine)
 
 	loops := []func(context.Context){h.flushLoop, h.heartbeatLoop, h.walkLoop, h.followLoop, h.pruneLoop, h.noteLoop}
 	for _, loop := range loops {
@@ -319,36 +303,13 @@ func (h *helper) Rename(oldRel, newRel string) {
 	if err := h.store.Rename(oldRel, newRel); err != nil {
 		h.log.Printf("could not move the history of %s to %s: %v", oldRel, newRel, err)
 	}
-	// Tell the other machines about a renamed folder (see NewDir).
-	if st, err := os.Lstat(filepath.Join(h.cfg.Folder, newRel)); err == nil && st.IsDir() {
-		h.store.Journal.Append(history.Event{Time: h.store.Now().UTC(), Op: history.OpMoveFolder,
-			Path: filepath.ToSlash(oldRel), To: filepath.ToSlash(newRel)})
-	}
 }
 
-// NewDir writes down a folder created through this machine. The other
-// machines cannot see it being created, and without this note they would
-// not notice files saved into it until their next catch-up.
-func (h *helper) NewDir(rel string) {
-	h.store.Journal.Append(history.Event{Time: h.store.Now().UTC(), Op: history.OpNewFolder, Path: filepath.ToSlash(rel)})
-}
-
-// watchFolder starts watching a folder this machine did not know about.
-// It returns the files already in it (see watch.Watcher.Ensure).
-func (h *helper) watchFolder(abs string) []string {
-	if h.watcher == nil {
-		return nil
-	}
-	n, files := h.watcher.Ensure(abs)
-	if n > 0 {
-		rel, _ := filepath.Rel(h.cfg.Folder, abs)
-		h.log.Printf("now watching %d new folder(s) at %s", n, rel)
-	}
-	return files
-}
-
-func (h *helper) Overflow() {
-	h.log.Printf("too many changes at once; scheduling a catch-up")
+// CatchUp is called when the change log cannot be trusted to hold
+// everything: some entries were no longer there, or the reader had to
+// start again without a position. A walk of the changed files covers it.
+func (h *helper) CatchUp(reason string) {
+	h.log.Printf("%s; scheduling a catch-up", reason)
 	select {
 	case h.walkNow <- struct{}{}:
 	default:
@@ -404,10 +365,11 @@ func (h *helper) heartbeatLoop(ctx context.Context) {
 func (h *helper) writeHeartbeat() {
 	h.mu.Lock()
 	hb := Heartbeat{PID: os.Getpid(), Time: time.Now(), Started: h.started, LastVersion: h.lastVersion,
-		LastWalk: h.lastWalk, LastPrune: h.lastPrune, Healthy: h.healthy, Ready: h.ready}
+		LastWalk: h.lastWalk, LastPrune: h.lastPrune, Healthy: h.healthy, Ready: h.ready, ChangeLog: h.changeLog}
+	rc := h.recorder
 	h.mu.Unlock()
-	if h.watcher != nil {
-		hb.Watched = h.watcher.Watched()
+	if rc != nil {
+		hb.LogVersion, hb.LogEntries = rc.Version(), rc.Entries()
 	}
 	data, _ := json.Marshal(hb)
 	config.WritePrivate(HeartbeatFile(), data)
@@ -435,14 +397,21 @@ func (h *helper) saveLastWalk(t time.Time) {
 // walkLoop runs the catch-up walk at start, on request and periodically.
 func (h *helper) walkLoop(ctx context.Context) {
 	h.walk(ctx, true)
-	t := time.NewTicker(h.t.Walk)
-	defer t.Stop()
 	for {
+		every := h.t.Walk
+		h.mu.Lock()
+		if !h.changeLog {
+			every = h.t.WalkNoLog // without the log, the walk is the only recorder
+		}
+		h.mu.Unlock()
+		timer := time.NewTimer(every)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-t.C:
+		case <-timer.C:
 		case <-h.walkNow:
+			timer.Stop()
 		}
 		h.walk(ctx, false)
 	}
@@ -469,12 +438,6 @@ func (h *helper) walk(ctx context.Context, atStart bool) {
 		since = since.Add(-10 * time.Minute)
 	}
 	begun := time.Now()
-	// Make sure every folder is watched, in case a note from another
-	// machine about a new or renamed folder was missed. At start the
-	// watcher has only just looked at every folder.
-	if !atStart {
-		h.watchFolder(h.cfg.Folder)
-	}
 	pins, _ := config.Pins()
 	small := int64(h.cfg.SmallFileKB) * 1024
 	type changedFile struct {
@@ -578,16 +541,8 @@ func (h *helper) warm(ctx context.Context, paths []string) {
 	}
 }
 
-// followLoop reads what other machines did. It starts watching folders
-// they created or renamed, and brings small files and files in pinned
-// folders into the local cache.
-//
-// Late checks: a file found in a folder this machine was not yet watching
-// may have been saved here in the few seconds before the watch began, in
-// which case nobody has recorded it. More often the other machine saved
-// it and will record it itself. So such files are set aside until the
-// other machines have been quiet for a while, and then checked: whatever
-// still has no version of its current content is recorded here.
+// followLoop reads what other machines did and brings small files and
+// files in pinned folders into the local cache.
 func (h *helper) followLoop(ctx context.Context) {
 	offsets := map[string]int64{}
 	// Start at the current end of each journal: the walk covers the past.
@@ -599,40 +554,7 @@ func (h *helper) followLoop(ctx context.Context) {
 			}
 		}
 	}
-	late := map[string]time.Time{} // file -> when it was set aside
-	setAside := func(files []string) {
-		for _, f := range files {
-			if _, ok := late[f]; !ok {
-				late[f] = time.Now()
-			}
-		}
-	}
-	lastRemote := time.Now()
 	every(ctx, h.t.Follow, func() {
-		defer func() {
-			now := time.Now()
-			idle := now.Sub(lastRemote) >= h.t.LateIdle
-			recorded := 0
-			for abs, since := range late {
-				if !idle && now.Sub(since) < h.t.LateMax {
-					continue
-				}
-				delete(late, abs)
-				rel, err := filepath.Rel(h.cfg.Folder, abs)
-				if err != nil {
-					continue
-				}
-				if made, err := h.store.Record(rel); err == nil && made {
-					recorded++
-				}
-			}
-			if recorded > 0 {
-				h.mu.Lock()
-				h.lastVersion = now
-				h.mu.Unlock()
-				h.log.Printf("recorded %d file(s) saved here before their folder was being watched", recorded)
-			}
-		}()
 		pins, _ := config.Pins()
 		small := int64(h.cfg.SmallFileKB) * 1024
 		seen := map[string]bool{}
@@ -645,30 +567,12 @@ func (h *helper) followLoop(ctx context.Context) {
 					continue
 				}
 				offsets[f] = off
-				if len(evs) > 0 {
-					lastRemote = time.Now()
-				}
 				for _, e := range evs {
-					rel := filepath.FromSlash(e.Path)
-					abs := filepath.Join(h.cfg.Folder, rel)
-					switch e.Op {
-					case history.OpNewFolder:
-						setAside(h.watchFolder(abs))
-						continue
-					case history.OpMoveFolder:
-						if h.watcher != nil && e.To != "" {
-							_, files := h.watcher.Moved(abs, filepath.Join(h.cfg.Folder, filepath.FromSlash(e.To)))
-							setAside(files)
-						}
-						continue
-					case "save", "restore":
-						// A file in a folder nobody told us about.
-						if h.watcher != nil && !h.watcher.Has(filepath.Dir(abs)) {
-							setAside(h.watchFolder(filepath.Dir(abs)))
-						}
-					default:
+					if e.Op != "save" && e.Op != "restore" {
 						continue
 					}
+					rel := filepath.FromSlash(e.Path)
+					abs := filepath.Join(h.cfg.Folder, rel)
 					if seen[abs] {
 						continue
 					}
@@ -684,6 +588,110 @@ func (h *helper) followLoop(ctx context.Context) {
 			}
 		}
 		h.warm(ctx, warm)
+	})
+}
+
+// driveStatus asks juicefs about the drive. It works with every index.
+func (h *helper) driveStatus(ctx context.Context) (jfs.DriveStatus, error) {
+	var pw string
+	if !h.cfg.IsLocal() {
+		var err error
+		if pw, err = config.Password(); err != nil {
+			return jfs.DriveStatus{}, err
+		}
+	}
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return h.jfs.Status(cctx, mount.IndexURL(h.cfg), pw)
+}
+
+// recordLoop follows the drive's change log for as long as the log is on.
+// When it is off, nothing is followed and the periodic walk records
+// versions; the setting is looked at again from time to time.
+func (h *helper) recordLoop(ctx context.Context) {
+	var cancelRec context.CancelFunc
+	var recDone chan struct{}
+	stopRec := func() {
+		if cancelRec != nil {
+			cancelRec()
+			<-recDone
+			cancelRec, recDone = nil, nil
+			h.mu.Lock()
+			h.recorder = nil
+			h.mu.Unlock()
+		}
+	}
+	defer stopRec()
+	asked := false
+	for {
+		on := true
+		if st, err := h.driveStatus(ctx); err == nil {
+			on = st.ChangeLog
+		} else if ctx.Err() == nil {
+			h.log.Printf("could not read the drive's change-log setting (%v); assuming it is on", err)
+		}
+		h.mu.Lock()
+		changed := on != h.changeLog || !asked
+		h.changeLog = on
+		h.mu.Unlock()
+		asked = true
+		switch {
+		case on && cancelRec == nil:
+			h.log.Printf("following the drive's change log")
+			rec := h.newRecorder()
+			rctx, cancel := context.WithCancel(ctx)
+			cancelRec, recDone = cancel, make(chan struct{})
+			h.mu.Lock()
+			h.recorder = rec
+			h.mu.Unlock()
+			go func(done chan struct{}) {
+				defer close(done)
+				if err := rec.Run(rctx, nil); err != nil {
+					h.log.Printf("following the change log: %v", err)
+				}
+			}(recDone)
+		case !on && cancelRec != nil:
+			stopRec()
+		}
+		if changed && !on {
+			h.log.Printf("the drive's change log is off: versions are recorded by a walk every %s. Turn it on with: lorefs admin changelog on", h.t.WalkNoLog)
+			h.CatchUp("the change log was off")
+		}
+		h.writeHeartbeat()
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(h.t.LogCheck):
+		}
+	}
+}
+
+func (h *helper) newRecorder() *record.Recorder {
+	env := []string{}
+	if !h.cfg.IsLocal() {
+		if pw, err := config.Password(); err == nil {
+			env = append(env, "META_PASSWORD="+pw)
+		}
+	}
+	return record.New(record.Options{
+		Folder: h.cfg.Folder,
+		Source: record.ExecSource{Bin: jfs.Binary(), Meta: mount.IndexURL(h.cfg), Env: env},
+		Session: func() (int64, error) {
+			data, err := os.ReadFile(filepath.Join(h.cfg.Folder, ".config"))
+			if err != nil {
+				return 0, err
+			}
+			if n, ok := record.ParseSession(data); ok {
+				return n, nil
+			}
+			return 0, errors.New("the mount's session number is not readable")
+		},
+		Info:      record.InfoSource(jfs.Binary(), h.cfg.Folder),
+		Skip:      h.store.Skip,
+		Handler:   h,
+		Group:     record.GroupOptions{Quiet: h.t.Quiet, LongQuiet: h.t.LongQuiet, MaxWait: h.t.MaxWait, Workers: 12},
+		StateFile: filepath.Join(config.StateDir(), "changelog.json"),
+		Log:       h.log,
 	})
 }
 
