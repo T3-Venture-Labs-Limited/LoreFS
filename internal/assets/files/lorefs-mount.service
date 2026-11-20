@@ -1,0 +1,24 @@
+[Unit]
+Description=LoreFS shared drive
+Documentation=https://github.com/T3-Venture-Labs-Limited/LoreFS
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# The folder is writable only while the drive is mounted, so nothing can
+# be saved to the local disk by mistake when it is not.
+ExecStartPre=%h/.local/bin/lorefs mount pre
+ExecStart=%h/.local/bin/lorefs mount run
+ExecStop=%h/.local/bin/lorefs mount stop
+ExecStopPost=%h/.local/bin/lorefs mount post
+Restart=on-failure
+RestartSec=10
+# Stopping first tries a clean unmount. If a program is still using the
+# folder it is detached instead, and after this many seconds the drive
+# process is ended, so that program gets an error rather than a freeze.
+TimeoutStopSec=8
+
+[Install]
+WantedBy=default.target
