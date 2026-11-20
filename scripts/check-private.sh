@@ -81,13 +81,13 @@ scan() {
     while IFS=: read -r n _; do report "$label" "$n" "looks like $name"; done < <(grep -n -E -e "$re" "$file" 2>/dev/null)
   done <<< "$SHAPES"
   while IFS=: read -r n rest; do
-    while read -r a b c d; do
-      [ "$a" -le 255 ] && [ "$b" -le 255 ] && [ "$c" -le 255 ] && [ "$d" -le 255 ] || continue
-      case "$a.$b.$c" in
+    while read -r oa ob oc od; do
+      [ "$oa" -le 255 ] && [ "$ob" -le 255 ] && [ "$oc" -le 255 ] && [ "$od" -le 255 ] || continue
+      case "$oa.$ob.$oc" in
         127.*|10.*|0.0.0|192.168.*|169.254.*|203.0.113|198.51.100|192.0.2|255.255.255) continue ;;
         172.1[6-9].*|172.2[0-9].*|172.3[01].*) continue ;;
       esac
-      case "$a" in 1) [ "$b" = 4 ] && continue ;; esac       # 1.4.x version numbers
+      case "$oa" in 1) [ "$ob" = 4 ] && continue ;; esac       # 1.4.x version numbers
       report "$label" "$n" "holds a public IPv4 address"
     done < <(printf '%s\n' "$rest" | grep -o -E "$PUBLIC_IP" | tr '.' ' ')
   done < <(grep -n -E "$PUBLIC_IP" "$file" 2>/dev/null)
