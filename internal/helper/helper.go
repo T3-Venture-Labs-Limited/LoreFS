@@ -792,6 +792,10 @@ func (h *helper) healthLoop(ctx context.Context) error {
 }
 
 func (h *helper) indexReachable() bool {
+	if h.cfg.IsLocal() {
+		_, err := os.Stat(h.cfg.IndexPath)
+		return err == nil
+	}
 	target, err := mount.Target(h.cfg)
 	if err != nil {
 		return false

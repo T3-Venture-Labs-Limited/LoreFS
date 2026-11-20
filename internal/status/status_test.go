@@ -252,3 +252,48 @@ func TestFileBackup(t *testing.T) {
 		t.Fatalf("failed backup: %+v", c)
 	}
 }
+
+func TestChangeLogLine(t *testing.T) {
+	in := healthy()
+	if len(Evaluate(in)) == 0 || func() bool {
+		for _, c := range Evaluate(in) {
+			if c.ID == "change-log" {
+				return true
+			}
+		}
+		return false
+	}() {
+		t.Fatal("no change-log line when the drive's settings are unknown")
+	}
+	in.DriveKnown, in.ChangeLogOn, in.ChangeLogMaxAge = true, true, 24*time.Hour
+	c := find(t, Evaluate(in), "change-log")
+	if c.Level != OK || !strings.Contains(c.Detail, "24 hours") {
+		t.Fatalf("%+v", c)
+	}
+	in.ChangeLogOn = false
+	c = find(t, Evaluate(in), "change-log")
+	if c.Level != Warn || c.Next == "" {
+		t.Fatalf("%+v", c)
+	}
+}
+
+// A trial drive has no server: the lines that need one are not shown or
+// are plainly marked, and nothing fails because they are missing.
+func TestTrialDriveHasNoServerChecks(t *testing.T) {
+	in := healthy()
+	in.LocalIndex = true
+	in.IndexRTT, in.MemUsed, in.MemLimit, in.HasBackup = 0, 0, 0, false
+	in.DriveKnown, in.ChangeLogOn, in.ChangeLogMaxAge = true, true, 24*time.Hour
+	checks := Evaluate(in)
+	if Overall(checks) != OK {
+		t.Fatalf("a healthy trial drive should be ok: %+v", checks)
+	}
+	if !strings.Contains(find(t, checks, "index").Detail, "trial drive") {
+		t.Error("the index line should say it is a trial drive")
+	}
+	for _, c := range checks {
+		if c.ID == "index-memory" || c.ID == "file-backup" {
+			t.Errorf("%s does not apply to a trial drive", c.ID)
+		}
+	}
+}

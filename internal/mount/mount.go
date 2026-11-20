@@ -20,10 +20,11 @@ import (
 // IndexURL builds the address JuiceFS uses for the index. The password is
 // never part of it; it travels in the META_PASSWORD environment variable.
 func IndexURL(c config.Config) string {
-	scheme := "redis"
+	if c.IsLocal() {
+		return "sqlite3://" + c.IndexPath
+	}
 	q := url.Values{}
 	if c.IndexTLS {
-		scheme = "rediss"
 		q.Set("tls-ca-cert-file", config.CAFile())
 	}
 	if c.ClientCache {
@@ -33,7 +34,7 @@ func IndexURL(c config.Config) string {
 	// an unreachable index produces an error rather than a long hang.
 	q.Set("read-timeout", "10s")
 	u := url.URL{
-		Scheme:   scheme,
+		Scheme:   c.IndexScheme,
 		Host:     net.JoinHostPort(c.IndexHost, strconv.Itoa(c.IndexPort)),
 		Path:     "/" + strconv.Itoa(c.IndexDB),
 		RawQuery: q.Encode(),
@@ -52,6 +53,9 @@ func Args(c config.Config) []string {
 		"--free-space-ratio", "0.1",
 		"--backup-meta", "1h",
 		"--io-retries", "8",
+		// Act as the drive's owner on every computer, whatever this
+		// computer's user numbers are (drive-mount spec).
+		"--all-squash", fmt.Sprintf("%d:%d", c.OwnerUID, c.OwnerGID),
 		"--no-usage-report",
 		"--no-syslog",
 		// Keep JuiceFS's own files (.accesslog never ends when read) out of
@@ -73,6 +77,9 @@ func Args(c config.Config) []string {
 
 // Target returns the index login for this machine.
 func Target(c config.Config) (index.Target, error) {
+	if c.IsLocal() {
+		return index.Target{}, nil // a trial drive has no server to log in to
+	}
 	pw, err := config.Password()
 	if err != nil {
 		return index.Target{}, err
@@ -120,9 +127,12 @@ func Post(c config.Config) error {
 
 // Run replaces this process with `juicefs mount` in the foreground.
 func Run(c config.Config) error {
-	pw, err := config.Password()
-	if err != nil {
-		return err
+	var pw string
+	if !c.IsLocal() {
+		var err error
+		if pw, err = config.Password(); err != nil {
+			return err
+		}
 	}
 	bin := jfs.Binary()
 	path, err := exec.LookPath(bin)
@@ -132,7 +142,10 @@ func Run(c config.Config) error {
 	if err := os.MkdirAll(c.CacheDir, 0o700); err != nil {
 		return err
 	}
-	env := append(withoutEnv(os.Environ(), "META_PASSWORD"), "META_PASSWORD="+pw)
+	env := withoutEnv(os.Environ(), "META_PASSWORD")
+	if pw != "" {
+		env = append(env, "META_PASSWORD="+pw)
+	}
 	return syscall.Exec(path, append([]string{"juicefs"}, Args(c)...), env)
 }
 

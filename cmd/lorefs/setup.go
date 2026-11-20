@@ -19,7 +19,7 @@ func cmdJoin(args []string) error {
 	folder := fs.String("folder", "", "where the drive should appear (default ~/Lore)")
 	tokenFile := fs.String("token-file", "", "read the join code from this file")
 	tokenStdin := fs.Bool("token-stdin", false, "read the join code from standard input")
-	yes := fs.Bool("yes", false, "do not ask for confirmation")
+	fs.Bool("yes", false, "accepted for older scripts; joining asks nothing")
 	cacheDir := fs.String("cache-dir", "", "where to keep the local cache (default ~/.cache/lorefs)")
 	cacheLimit := fs.Int("cache-limit-mb", 0, "largest size of the local cache in MB (default 51200)")
 	if _, err := parse(fs, args); err != nil {
@@ -71,14 +71,6 @@ func cmdJoin(args []string) error {
 
 	cfg, err := setup.Join(setup.JoinOptions{
 		Token: code, Machine: machine, Folder: *folder, CacheDir: *cacheDir, CacheLimitMB: *cacheLimit,
-		ConfirmUID: func(mine, drive int) bool {
-			fmt.Printf("\nYour user number on this computer is %d, but the drive's files belong to user number %d.\n", mine, drive)
-			fmt.Println("You would be able to read files but not change the ones others created.")
-			if *yes {
-				return true
-			}
-			return ui.Confirm("Continue anyway?")
-		},
 		Progress: func(s string) { fmt.Println(s) },
 	})
 	switch {

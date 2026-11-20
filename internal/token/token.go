@@ -9,31 +9,50 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
-// Prefix marks a LoreFS join token and its format version.
-const Prefix = "lorefs1_"
+// Prefix marks a join code of the current format. Codes of format 1,
+// made by the program that came before, are still accepted.
+const (
+	Prefix = "lorefs2_"
+)
 
 // Token is the decoded content of a join token.
 type Token struct {
 	V        int    `json:"v"`
 	Drive    string `json:"drive"`
+	Scheme   string `json:"scheme,omitempty"` // "rediss" or "redis"; empty in format 1
 	Host     string `json:"host"`
 	Port     int    `json:"port"`
 	DB       int    `json:"db"`
 	TLS      bool   `json:"tls"`
 	Password string `json:"password"`
-	CA       string `json:"ca,omitempty"` // PEM certificate authority
-	UID      int    `json:"uid"`          // owner of the drive's files
+	CA       string `json:"ca,omitempty"`  // PEM certificate authority
+	UID      int    `json:"uid"`           // user that owns the drive's files
+	GID      int    `json:"gid,omitempty"` // group that owns them; 0 in format 1
 }
 
 // ErrInvalid is wrapped by every decoding error.
 var ErrInvalid = errors.New("not a valid join token")
 
+// ErrTrialDrive is returned when asked to encode a drive whose index is a
+// file on one computer: nobody else can reach it.
+var ErrTrialDrive = errors.New("a trial drive lives on this computer only, so it has no join code")
+
 // Encode turns a Token into the string a person copies.
 func Encode(t Token) (string, error) {
-	t.V = 1
+	t.V = 2
+	if t.Scheme == "sqlite3" {
+		return "", ErrTrialDrive
+	}
+	if t.Scheme == "" {
+		t.Scheme = "redis"
+		if t.TLS {
+			t.Scheme = "rediss"
+		}
+	}
 	if err := t.check(); err != nil {
 		return "", err
 	}
@@ -44,13 +63,16 @@ func Encode(t Token) (string, error) {
 	return Prefix + base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
-// Decode parses and validates a join token.
+// Decode parses and validates a join token of format 1 or 2.
 func Decode(s string) (Token, error) {
 	var t Token
 	s = strings.TrimSpace(s)
-	body, ok := strings.CutPrefix(s, Prefix)
+	body, v, ok := splitPrefix(s)
 	if !ok {
 		return t, fmt.Errorf("%w: it should start with %q", ErrInvalid, Prefix)
+	}
+	if v > 2 {
+		return t, fmt.Errorf("%w: it was made by a newer version of lorefs (format %d); update lorefs and try again", ErrInvalid, v)
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(body)
 	if err != nil {
@@ -59,13 +81,41 @@ func Decode(s string) (Token, error) {
 	if err := json.Unmarshal(raw, &t); err != nil {
 		return t, fmt.Errorf("%w: it looks cut off or mistyped", ErrInvalid)
 	}
-	if t.V != 1 {
-		return t, fmt.Errorf("%w: it was made by a newer version of lorefs (format %d)", ErrInvalid, t.V)
+	if t.V > 2 {
+		return t, fmt.Errorf("%w: it was made by a newer version of lorefs (format %d); update lorefs and try again", ErrInvalid, t.V)
 	}
+	if t.V < 1 {
+		return t, fmt.Errorf("%w: it looks cut off or mistyped", ErrInvalid)
+	}
+	if t.Scheme == "" {
+		t.Scheme = "redis"
+		if t.TLS {
+			t.Scheme = "rediss"
+		}
+	}
+	t.TLS = t.Scheme == "rediss"
 	if err := t.check(); err != nil {
 		return t, err
 	}
 	return t, nil
+}
+
+// splitPrefix recognises "lorefs<digits>_" and returns the rest and the
+// format number.
+func splitPrefix(s string) (body string, v int, ok bool) {
+	rest, found := strings.CutPrefix(s, "lorefs")
+	if !found {
+		return "", 0, false
+	}
+	n := strings.IndexByte(rest, '_')
+	if n < 1 {
+		return "", 0, false
+	}
+	v, err := strconv.Atoi(rest[:n])
+	if err != nil || v < 1 {
+		return "", 0, false
+	}
+	return rest[n+1:], v, true
 }
 
 func (t Token) check() error {

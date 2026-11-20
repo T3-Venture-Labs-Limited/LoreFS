@@ -49,10 +49,19 @@ type Inputs struct {
 	// IndexRejected: the index answered but refused this machine's password.
 	IndexRejected bool
 	IndexRTT      time.Duration
-	MemUsed       int64
-	MemLimit      int64
-	BackupAt      time.Time
-	HasBackup     bool
+	// LocalIndex: a trial drive, whose index is a file on this computer.
+	// The checks that need a Redis-compatible server (response time,
+	// memory, index copy, file backup record) do not apply to it.
+	LocalIndex bool
+	// What `juicefs status` says, which works with every kind of index.
+	DriveKnown      bool
+	ChangeLogOn     bool
+	ChangeLogMaxAge time.Duration
+	Sessions        int
+	MemUsed         int64
+	MemLimit        int64
+	BackupAt        time.Time
+	HasBackup       bool
 	// The copy of file contents to a second provider, if the drive has one.
 	FileBackup    index.FileBackup
 	HasFileBackup bool
@@ -108,6 +117,8 @@ func Evaluate(in Inputs) []Check {
 
 	// Index.
 	switch {
+	case in.LocalIndex && in.IndexErr == nil:
+		add(Check{ID: "index", Title: "Index", Level: OK, Detail: "a trial drive: the index is a file on this computer"})
 	case in.IndexRejected:
 		add(Check{ID: "index", Title: "Index", Level: Fail,
 			Detail: "The drive no longer accepts this computer's join code, because the drive's password was changed. Files cannot be opened or saved.",
@@ -176,6 +187,8 @@ func Evaluate(in Inputs) []Check {
 	// before a stale backup counts against it.
 	settled := in.Mounted && !in.HelperSince.IsZero() && in.Now.Sub(in.HelperSince) > 30*time.Minute
 	switch {
+	case in.LocalIndex:
+		add(Check{ID: "backup", Title: "Index backup", Level: OK, Detail: "not kept for a trial drive; it holds only test files"})
 	case in.IndexErr != nil:
 		add(Check{ID: "backup", Title: "Index backup", Level: Warn, Detail: "not checked, because the index cannot be reached"})
 	case !in.HasBackup && settled && in.Now.Sub(in.HelperSince) > 2*time.Hour:
@@ -193,7 +206,7 @@ func Evaluate(in Inputs) []Check {
 	}
 
 	// Copy of the files to a second provider (nightly).
-	if in.IndexErr == nil && in.HasFileBackup {
+	if in.IndexErr == nil && !in.LocalIndex && in.HasFileBackup {
 		b := in.FileBackup
 		age := in.Now.Sub(b.Time)
 		switch {
@@ -211,8 +224,21 @@ func Evaluate(in Inputs) []Check {
 		}
 	}
 
+	// Change log: the source of version history. Known from the drive's own
+	// settings, whatever kind of index holds them.
+	if in.DriveKnown {
+		if in.ChangeLogOn {
+			add(Check{ID: "change-log", Title: "Change log", Level: OK,
+				Detail: fmt.Sprintf("on, kept for %s", Age(in.ChangeLogMaxAge))})
+		} else {
+			add(Check{ID: "change-log", Title: "Change log", Level: Warn,
+				Detail: "The drive's change log is off, so changes cannot be recorded in version history as they happen.",
+				Next:   "Turn it on with: lorefs repair"})
+		}
+	}
+
 	// Index memory.
-	if in.IndexErr == nil {
+	if in.IndexErr == nil && !in.LocalIndex {
 		switch {
 		case in.MemLimit <= 0:
 			add(Check{ID: "index-memory", Title: "Index memory", Level: OK, Detail: Size(in.MemUsed) + " used (no limit set)"})

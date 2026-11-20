@@ -1,6 +1,7 @@
 package status
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -55,9 +56,37 @@ func gather(cfg config.Config) Inputs {
 
 	// Index: one connection for the response time, memory and backup age.
 	target, err := mount.Target(cfg)
-	if err != nil {
+	switch {
+	case cfg.IsLocal():
+		in.LocalIndex = true
+		if _, serr := os.Stat(cfg.IndexPath); serr != nil {
+			in.IndexErr = errors.New("the trial drive's index file is missing")
+		}
+	case err != nil:
 		in.IndexErr = errors.New("the saved connection details are missing")
-	} else if conn, err := index.Dial(target, 8*time.Second); err != nil {
+	default:
+		gatherRedis(cfg, target, &in)
+	}
+	if in.IndexErr == nil {
+		var pw string
+		if !cfg.IsLocal() {
+			pw, _ = config.Password()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		if ds, serr := jfs.NewExec().Status(ctx, mount.IndexURL(cfg), pw); serr == nil {
+			in.DriveKnown, in.ChangeLogOn, in.ChangeLogMaxAge = true, ds.ChangeLog, ds.ChangeLogMaxAge
+			in.Sessions = len(ds.Sessions)
+		}
+		cancel()
+	}
+	gatherRest(cfg, &in)
+	return in
+}
+
+// gatherRedis uses one connection for the response time, memory and
+// backup age. These need a Redis-compatible index.
+func gatherRedis(cfg config.Config, target index.Target, in *Inputs) {
+	if conn, err := index.Dial(target, 8*time.Second); err != nil {
 		in.IndexErr = err
 		in.IndexRejected = errors.Is(err, index.ErrPassword)
 	} else {
@@ -73,7 +102,9 @@ func gather(cfg config.Config) Inputs {
 		}
 		conn.Close()
 	}
+}
 
+func gatherRest(cfg config.Config, in *Inputs) {
 	// Storage and cache need the mounted drive to say where they are.
 	cacheDir := cfg.CacheDir
 	if in.Mounted {
@@ -96,7 +127,6 @@ func gather(cfg config.Config) Inputs {
 		in.HelperSince, in.LastVersion = hb.Started, hb.LastVersion
 		in.HelperReady, in.HelperWatched = hb.Ready, hb.Watched
 	}
-	return in
 }
 
 // probeStorage checks that the place holding file contents answers.

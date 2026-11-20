@@ -108,10 +108,7 @@ type JoinOptions struct {
 	// CacheDir and CacheLimitMB override the defaults when set.
 	CacheDir     string
 	CacheLimitMB int
-	// ConfirmUID is asked when the user's numeric id differs from the
-	// drive's. Returning false cancels the join.
-	ConfirmUID func(mine, drive int) bool
-	Progress   func(string)
+	Progress     func(string)
 }
 
 // Join connects this machine to a drive. If anything fails before the
@@ -140,17 +137,19 @@ func Join(opt JoinOptions) (config.Config, error) {
 	if !formatted {
 		return cfg, fmt.Errorf("%w: it points at an index that holds no drive", ErrTokenRejected)
 	}
-	if tok.UID != os.Getuid() && opt.ConfirmUID != nil && !opt.ConfirmUID(os.Getuid(), tok.UID) {
-		return cfg, errors.New("cancelled; nothing was changed")
-	}
 
 	cfg.DriveName = tok.Drive
 	cfg.Machine = history.CleanMachine(opt.Machine)
 	if opt.Folder != "" {
 		cfg.Folder = opt.Folder
 	}
-	cfg.IndexHost, cfg.IndexPort, cfg.IndexDB, cfg.IndexTLS = tok.Host, tok.Port, tok.DB, tok.TLS
-	cfg.OwnerUID = tok.UID
+	cfg.IndexScheme, cfg.IndexHost, cfg.IndexPort, cfg.IndexDB, cfg.IndexTLS = tok.Scheme, tok.Host, tok.Port, tok.DB, tok.TLS
+	// Whatever this computer's user numbers are, the drive's files act as
+	// the user and group that made the drive (see mount.Args).
+	cfg.OwnerUID, cfg.OwnerGID = tok.UID, tok.GID
+	if tok.GID == 0 { // a code from the earlier format carries no group
+		cfg.OwnerGID = os.Getgid()
+	}
 	if opt.CacheDir != "" {
 		cfg.CacheDir = opt.CacheDir
 	}
@@ -219,8 +218,8 @@ func Invite() (string, error) {
 		return "", err
 	}
 	return token.Encode(token.Token{
-		Drive: cfg.DriveName, Host: cfg.IndexHost, Port: cfg.IndexPort, DB: cfg.IndexDB,
-		TLS: cfg.IndexTLS, Password: target.Password, CA: string(target.CAPEM), UID: cfg.OwnerUID,
+		Drive: cfg.DriveName, Scheme: cfg.IndexScheme, Host: cfg.IndexHost, Port: cfg.IndexPort, DB: cfg.IndexDB,
+		TLS: cfg.IndexTLS, Password: target.Password, CA: string(target.CAPEM), UID: cfg.OwnerUID, GID: cfg.OwnerGID,
 	})
 }
 
