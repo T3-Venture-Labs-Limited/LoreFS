@@ -24,6 +24,7 @@ func cmdMakeToken(args []string) error {
 	caFile := fs.String("ca-file", "", "certificate authority file (PEM)")
 	noTLS := fs.Bool("no-tls", false, "for local testing only")
 	uid := fs.Int("uid", os.Getuid(), "numeric id of the user who owns the drive's files")
+	gid := fs.Int("gid", os.Getgid(), "numeric id of the group that owns them")
 	if _, err := parse(fs, args); err != nil {
 		return err
 	}
@@ -31,7 +32,7 @@ func cmdMakeToken(args []string) error {
 	if pw == "" {
 		return errUsage("set META_PASSWORD in the environment")
 	}
-	t := token.Token{Drive: *drive, Host: *host, Port: *port, DB: *db, TLS: !*noTLS, Password: pw, UID: *uid}
+	t := token.Token{Drive: *drive, Host: *host, Port: *port, DB: *db, TLS: !*noTLS, Password: pw, UID: *uid, GID: *gid}
 	if t.TLS {
 		ca, err := os.ReadFile(*caFile)
 		if err != nil {

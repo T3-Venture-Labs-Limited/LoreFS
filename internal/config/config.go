@@ -21,14 +21,23 @@ var ErrNotJoined = errors.New("this machine has not joined a drive")
 
 // Config is the content of config.toml.
 type Config struct {
-	DriveName    string // name of the drive, shown in status
-	Machine      string // short name of this machine, shown in history
-	Folder       string // where the drive is mounted
-	IndexHost    string
-	IndexPort    int
-	IndexDB      int
-	IndexTLS     bool // false only for local testing
-	OwnerUID     int  // numeric user id that owns the drive's files
+	DriveName string // name of the drive, shown in status
+	Machine   string // short name of this machine, shown in history
+	Folder    string // where the drive is mounted
+	// The index is described by a scheme, an address and a database (see
+	// index.go): "rediss" (encrypted, the default), "redis" (not
+	// encrypted, for testing) or "sqlite3" (a trial drive on this
+	// computer, whose address is IndexPath). Valkey is reached as redis.
+	IndexScheme string
+	IndexHost   string
+	IndexPort   int
+	IndexDB     int
+	IndexPath   string // trial drives: the index file
+	IndexTLS    bool   // kept equal to IndexScheme == "rediss"
+	// Every computer acts on the drive as the user and group that created
+	// it (see drive-mount), whatever the local ids are.
+	OwnerUID     int
+	OwnerGID     int
 	CacheDir     string
 	CacheLimitMB int
 	// ClientCache turns on JuiceFS's pushed metadata cache. It is off by
@@ -53,9 +62,11 @@ func Defaults() Config {
 	return Config{
 		DriveName:      "lorefs",
 		Folder:         filepath.Join(home, "Lore"),
+		IndexScheme:    SchemeEncrypted,
 		IndexDB:        1,
 		IndexTLS:       true,
 		OwnerUID:       os.Getuid(),
+		OwnerGID:       os.Getgid(),
 		CacheDir:       filepath.Join(home, ".cache", "lorefs"),
 		CacheLimitMB:   51200,
 		ClientCache:    false,
@@ -121,6 +132,7 @@ func Load() (Config, error) {
 	defer f.Close()
 	sc := bufio.NewScanner(f)
 	line := 0
+	sawIndex := false
 	for sc.Scan() {
 		line++
 		text := strings.TrimSpace(sc.Text())
@@ -132,11 +144,18 @@ func Load() (Config, error) {
 			return c, fmt.Errorf("%s line %d: expected key = value", File(), line)
 		}
 		key, raw = strings.TrimSpace(key), strings.TrimSpace(raw)
+		if key == "index" {
+			sawIndex = true
+		}
 		if err := c.set(key, raw); err != nil {
 			return c, fmt.Errorf("%s line %d: %w", File(), line, err)
 		}
 	}
-	return c, sc.Err()
+	if err := sc.Err(); err != nil {
+		return c, err
+	}
+	c.normalize(sawIndex)
+	return c, nil
 }
 
 func (c *Config) set(key, raw string) error {
@@ -171,6 +190,12 @@ func (c *Config) set(key, raw string) error {
 		return str(&c.Machine)
 	case "folder":
 		return str(&c.Folder)
+	case "index":
+		var raw string
+		if err := str(&raw); err != nil {
+			return err
+		}
+		return c.setIndex(raw)
 	case "index_host":
 		return str(&c.IndexHost)
 	case "index_port":
@@ -181,6 +206,8 @@ func (c *Config) set(key, raw string) error {
 		return flag(&c.IndexTLS)
 	case "owner_uid":
 		return num(&c.OwnerUID)
+	case "owner_gid":
+		return num(&c.OwnerGID)
 	case "cache_dir":
 		return str(&c.CacheDir)
 	case "cache_limit_mb":
@@ -211,11 +238,15 @@ func (c Config) Save() error {
 		"drive_name = " + q(c.DriveName),
 		"machine = " + q(c.Machine),
 		"folder = " + q(c.Folder),
+		"index = " + q(c.IndexURL()),
+		// The next four keys repeat the address for programs that predate
+		// the "index" key.
 		"index_host = " + q(c.IndexHost),
 		"index_port = " + strconv.Itoa(c.IndexPort),
 		"index_db = " + strconv.Itoa(c.IndexDB),
 		"index_tls = " + strconv.FormatBool(c.IndexTLS),
 		"owner_uid = " + strconv.Itoa(c.OwnerUID),
+		"owner_gid = " + strconv.Itoa(c.OwnerGID),
 		"cache_dir = " + q(c.CacheDir),
 		"cache_limit_mb = " + strconv.Itoa(c.CacheLimitMB),
 		"client_cache = " + strconv.FormatBool(c.ClientCache),

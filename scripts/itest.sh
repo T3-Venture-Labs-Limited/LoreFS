@@ -15,6 +15,9 @@ T="${LOREFS_ITEST_DIR:-/tmp/lorefs-itest}"
 REDIS_NAME=lorefs-itest-redis
 REDIS_PORT=16380
 REDIS_PW=itest-password-not-a-real-secret
+# The index server image. Set INDEX_IMAGE=valkey/valkey:8-alpine to run
+# the whole rig against Valkey instead of Redis.
+INDEX_IMAGE="${INDEX_IMAGE:-redis:8-alpine}"
 KEEP=0; FAST=0
 CLEAN_ONLY=0
 for a in "$@"; do case "$a" in --keep) KEEP=1 ;; --fast) FAST=1 ;; --cleanup-only) CLEAN_ONLY=1 ;; esac; done
@@ -63,12 +66,15 @@ cleanup 2>/dev/null
 [ "$CLEAN_ONLY" = 1 ] && { echo "cleaned up $T"; exit 0; }
 mkdir -p "$T/store" "$T/alpha" "$T/beta" "$T/gamma"
 
-section "Setting up a local drive with two computers"
-docker run -d --name "$REDIS_NAME" -p "127.0.0.1:$REDIS_PORT:6379" redis:8-alpine \
+section "Setting up a local drive with two computers (index: $INDEX_IMAGE)"
+docker run -d --name "$REDIS_NAME" -p "127.0.0.1:$REDIS_PORT:6379" "$INDEX_IMAGE" \
   redis-server --requirepass "$REDIS_PW" --maxmemory-policy noeviction --appendonly no >/dev/null || { echo "docker failed"; exit 1; }
 within 20 docker exec "$REDIS_NAME" redis-cli -a "$REDIS_PW" --no-auth-warning ping
 META_PASSWORD="$REDIS_PW" "$JFS" format --storage file --bucket "$T/store/" --trash-days 7 \
   "redis://127.0.0.1:$REDIS_PORT/1" itest >"$T/format.log" 2>&1 || { cat "$T/format.log"; exit 1; }
+# The drive keeps a change log, as `lorefs create` will set it up.
+META_PASSWORD="$REDIS_PW" "$JFS" config "redis://127.0.0.1:$REDIS_PORT/1" --changelog \
+  --changelog-max-age 24h --changelog-max-lines 100000 >>"$T/format.log" 2>&1 || { cat "$T/format.log"; exit 1; }
 META_PASSWORD="$REDIS_PW" "$LORE" make-token --host 127.0.0.1 --port "$REDIS_PORT" --db 1 --drive itest --no-tls >"$T/token"
 
 # A bad join code must change nothing.
@@ -169,6 +175,10 @@ sleep 1; echo "second draft" >"$A/notes/plan.md"
 within 10 eval '[ "$(versions alpha notes/plan.md)" = 2 ]' && ok "a changed file gets a second version" || bad "a changed file gets a second version"
 old=$(lore_a open --path notes/plan.md 2)
 [ "$(cat "$old")" = "first draft" ] && ok "the earlier version holds the earlier content" || bad "the earlier version holds the earlier content"
+# Under --all-squash JuiceFS itself checks the file's mode, and its open cache
+# (2 s) can let a writer through that was let in just before the file was made
+# read-only. Wait out the cache; see docs/design-notes/squash.md.
+sleep 3
 refute "a version cannot be modified" sh -c "echo x >> '$old'"
 within 5 eval '[ "$(versions beta notes/plan.md)" = 2 ]' && ok "beta sees the same history" || bad "beta sees the same history"
 lore_a history --list notes/plan.md | grep -q "alpha" && ok "the list shows time, computer and size" || bad "the list shows time, computer and size"
@@ -383,10 +393,14 @@ section "Status"
 sleep 3
 out=$(lore_a status); code=$?
 [ "$code" = 0 ] && echo "$out" | grep -q "Everything is working" && ok "a healthy drive reports healthy and exits 0" || bad "a healthy drive reports healthy and exits 0" "exit $code: $out"
-for word in "Drive" "Index" "Storage" "Local cache" "Version history" "Index backup" "Index memory" "JuiceFS"; do
+for word in "Drive" "Index" "Storage" "Local cache" "Version history" "Index backup" "Change log" "Index memory" "JuiceFS"; do
   echo "$out" | grep -q "$word" || bad "status shows: $word"; done; ok "status shows every item on one page"
 js=$(lore_a status --json); echo "$js" | jq -e '.overall == "ok" and (.checks | length >= 7)' >/dev/null && ok "status --json is valid and complete" || bad "status --json is valid and complete"
 { echo "$out"; echo "$js"; lore_a invite 2>&1 >/dev/null; } | grep -q "$REDIS_PW" && bad "status never shows the password" || ok "status never shows the password"
+echo "$js" | jq -e '.checks[] | select(.id == "change-log") | .level == "ok" and (.detail | test("24 hours"))' >/dev/null \
+  && ok "status reads the change-log setting through juicefs status" || bad "status reads the change-log setting through juicefs status" "$(echo "$js" | jq -c '.checks[] | select(.id == "change-log")')"
+echo "$js" | jq -e '.checks[] | select(.id == "index-memory" and .level == "ok")' >/dev/null \
+  && ok "the Redis-compatible checks (memory, response time) work on $INDEX_IMAGE" || bad "the Redis-compatible checks work on $INDEX_IMAGE"
 # Which version of lorefs each computer runs.
 echo "$js" | jq -e '.checks[] | select(.id == "program") | .level == "ok" and (.detail | test("the same on all 2 computers"))' >/dev/null \
   && ok "status says both computers run the same version of lorefs" || bad "status says both computers run the same version of lorefs" "$(echo "$js" | jq -c '.checks[] | select(.id == "program")')"
