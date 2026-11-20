@@ -96,12 +96,24 @@ func StateDir() string {
 	return filepath.Join(home, ".local", "state", "lorefs")
 }
 
+// DataDir is where trial drives keep their index and files.
+func DataDir() string {
+	if d := os.Getenv("LOREFS_DATA_DIR"); d != "" {
+		return d
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "share", "lorefs")
+}
+
 // JoinedAt is when this machine joined the drive: the time its saved
-// secret was written. Zero when unknown.
+// secret was written (for a trial drive, which has none, the settings).
+// Zero when unknown.
 func JoinedAt() time.Time {
 	st, err := os.Stat(SecretFile())
 	if err != nil {
-		return time.Time{}
+		if st, err = os.Stat(File()); err != nil {
+			return time.Time{}
+		}
 	}
 	return st.ModTime()
 }

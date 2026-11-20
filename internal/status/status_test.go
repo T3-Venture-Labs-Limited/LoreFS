@@ -21,7 +21,7 @@ func healthy() Inputs {
 		BackupAt: now.Add(-40 * time.Minute), HasBackup: true,
 		StorageName: "lorefs.s3.example.com",
 		CacheUsed:   3 << 30, CacheLimit: 50 << 30, DiskFreePct: 60,
-		HelperRunning: true, HelperReady: true, HelperWatched: 354,
+		HelperRunning: true, HelperReady: true, HelperLogRead: 354,
 		HelperSince: now.Add(-5 * time.Hour), LastVersion: now.Add(-3 * time.Minute),
 	}
 }
@@ -211,10 +211,10 @@ func TestProgramVersionAcrossComputers(t *testing.T) {
 
 func TestHelperStillStarting(t *testing.T) {
 	in := healthy()
-	in.HelperReady, in.HelperWatched, in.HelperSince = false, 120, now.Add(-40*time.Second)
+	in.HelperReady, in.HelperLogRead, in.HelperSince = false, 120, now.Add(-40*time.Second)
 	checks := Evaluate(in)
 	c := find(t, checks, "history")
-	if c.Level != OK || !strings.Contains(c.Detail, "starting: 120 folders") || !strings.Contains(c.Detail, "recorded once it is ready") {
+	if c.Level != OK || !strings.Contains(c.Detail, "starting: 120 changes") || !strings.Contains(c.Detail, "recorded once it is ready") {
 		t.Fatalf("a helper that has just started is not a problem: %+v", c)
 	}
 	if Overall(checks) != OK {
@@ -223,7 +223,7 @@ func TestHelperStillStarting(t *testing.T) {
 	// On a slow connection it can take many minutes; then say so.
 	in.HelperSince = now.Add(-9 * time.Minute)
 	c = find(t, Evaluate(in), "history")
-	if c.Level != Warn || !strings.Contains(c.Detail, "still starting after 9 minutes (120 folders") || !strings.Contains(c.Next, "Index line") {
+	if c.Level != Warn || !strings.Contains(c.Detail, "still starting after 9 minutes (120 changes") || !strings.Contains(c.Next, "Index line") {
 		t.Fatalf("a helper starting for 9 minutes should be explained: %+v", c)
 	}
 }
@@ -294,6 +294,25 @@ func TestTrialDriveHasNoServerChecks(t *testing.T) {
 	for _, c := range checks {
 		if c.ID == "index-memory" || c.ID == "file-backup" {
 			t.Errorf("%s does not apply to a trial drive", c.ID)
+		}
+	}
+}
+
+func TestRulesFileFromAnOlderTemplateIsMentionedNotChanged(t *testing.T) {
+	in := healthy()
+	in.RulesKnown, in.RulesVersion, in.RulesCurrent = true, 1, 2
+	checks := Evaluate(in)
+	c := find(t, checks, "rules")
+	if c.Level != OK || !strings.Contains(c.Detail, "older template") || !strings.Contains(c.Next, "lorefs rules diff") {
+		t.Fatalf("%+v", c)
+	}
+	if Overall(checks) != OK {
+		t.Fatal("an older template is information, not a warning")
+	}
+	in.RulesVersion = 2
+	for _, c := range Evaluate(in) {
+		if c.ID == "rules" {
+			t.Fatal("no line when the file is current")
 		}
 	}
 }

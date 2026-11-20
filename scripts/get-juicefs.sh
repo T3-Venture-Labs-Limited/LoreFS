@@ -11,13 +11,16 @@ declare -A SHA256=(
 )
 
 dest="${1:?usage: get-juicefs.sh <directory>}"
-case "$(uname -m)" in
-  x86_64) arch=amd64 ;;
-  aarch64) arch=arm64 ;;
-  *) echo "Unsupported processor: $(uname -m)" >&2; exit 1 ;;
-esac
+if [ -n "${JUICEFS_ARCH:-}" ]; then arch="$JUICEFS_ARCH"   # building a release for another processor
+else
+  case "$(uname -m)" in
+    x86_64) arch=amd64 ;;
+    aarch64) arch=arm64 ;;
+    *) echo "Unsupported processor: $(uname -m)" >&2; exit 1 ;;
+  esac
+fi
 
-if [ -x "$dest/juicefs" ] && "$dest/juicefs" version 2>/dev/null | grep -q "version ${JUICEFS_VERSION}+"; then
+if [ -z "${JUICEFS_ARCH:-}" ] && [ -x "$dest/juicefs" ] && "$dest/juicefs" version 2>/dev/null | grep -q "version ${JUICEFS_VERSION}+"; then
   echo "JuiceFS ${JUICEFS_VERSION} is already installed in $dest"
   exit 0
 fi

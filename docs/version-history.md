@@ -39,22 +39,48 @@ however old the earlier content is. To change the period, set
 
 ## How it works
 
-Each computer records the saves made on that computer. A version is a
-copy made inside the drive's index: it takes no extra storage until the
+Each computer records the saves made through its own mount. A version is
+a copy made inside the drive's index: it takes no extra storage until the
 file's content is later replaced, and then only the replaced part.
 
-- Saves to one file less than 2 seconds apart are recorded as one
-  version holding the last content.
+The drive keeps a **change log**, a list of everything that was done to
+it (files created, written, renamed, deleted), written by JuiceFS. Each
+computer follows that list, keeps only the entries made through its own
+mount, works out which file each one is about, and records a version once
+the file has been quiet for half a second:
+
+- Saves to one file less than half a second apart become one version
+  holding the last content.
 - A file that is written without pause still gets a version every
   5 minutes.
-- If the recorder was not running while files changed, it records their
-  current content when it starts again.
-- A folder made or renamed on one computer is noticed by the others
-  within about 10 seconds, so edits anyone makes inside it are recorded.
-  A file saved in those first seconds is recorded a little later, within
-  a minute or so.
+- A file that is still being written is not recorded until its writer is
+  done; a version is only made when the file's size on the drive matches
+  what has been stored.
+- A folder made or renamed on any computer needs no introduction: the
+  others learn about it from the same list.
+- The change log keeps 24 hours of changes (up to 100,000 entries). A
+  computer remembers how far it has read, so after being switched off it
+  carries on from there. If it was off for longer than the log reaches
+  back, it notices, and records the files that changed since it last
+  looked by walking the drive (this takes longer, but misses nothing).
+- If the drive was made without a change log, or it was turned off
+  (`lorefs admin changelog off`), versions come from that walk alone,
+  every ten minutes. `lorefs status` says so and how to turn the log on:
+  `lorefs admin changelog on`.
 - Versions live in the hidden folder `.lorefs/history` at the top of the
   drive. Do not edit it by hand.
+
+## Limits
+
+- A version can be written to by a program that opened the version file
+  a moment before it was made read-only (the mount remembers recently
+  opened files for 2 seconds). Versions are protected against accidents,
+  not against a determined program.
+- Another computer's saves are recorded by that computer. If one computer
+  is never switched on again, its last few saves before it stopped may
+  not have versions.
+- The change log is JuiceFS's. LoreFS reads it with `juicefs changelog`
+  and does not modify it.
 
 ## What is not recorded
 

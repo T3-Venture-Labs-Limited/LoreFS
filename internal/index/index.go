@@ -50,9 +50,13 @@ func Dial(t Target, timeout time.Duration) (*Conn, error) {
 	var c net.Conn
 	var err error
 	if t.TLS {
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(t.CAPEM) {
-			return nil, fmt.Errorf("%w: the stored certificate is unreadable", ErrCertificate)
+		// No certificate given: trust the computer's own list of authorities.
+		var pool *x509.CertPool
+		if len(t.CAPEM) > 0 {
+			pool = x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(t.CAPEM) {
+				return nil, fmt.Errorf("%w: the stored certificate is unreadable", ErrCertificate)
+			}
 		}
 		c, err = tls.DialWithDialer(d, "tcp", addr, &tls.Config{
 			RootCAs: pool, ServerName: t.Host, MinVersion: tls.VersionTLS12,
@@ -258,6 +262,17 @@ func (c *Conn) LastFileBackup() (b FileBackup, ok bool, err error) {
 	return b, true, nil
 }
 
+// KeyCount returns how many keys the selected database holds. A database
+// that is not empty is not a safe place to create a drive.
+func (c *Conn) KeyCount() (int64, error) {
+	reply, err := c.Do("DBSIZE")
+	if err != nil {
+		return 0, err
+	}
+	n, _ := reply.(int64)
+	return n, nil
+}
+
 // IsFormatted reports whether the selected database holds a JuiceFS
 // filesystem, and returns its name.
 func (c *Conn) IsFormatted() (name string, ok bool) {
@@ -278,4 +293,49 @@ func (c *Conn) IsFormatted() (name string, ok bool) {
 		}
 	}
 	return name, true
+}
+
+// DriveSetting is what JuiceFS keeps about a drive in its index: where the
+// files are stored and the key to reach them (every computer of the drive
+// receives it when it mounts).
+type DriveSetting struct {
+	Name      string `json:"Name"`
+	Storage   string `json:"Storage"`
+	Bucket    string `json:"Bucket"`
+	AccessKey string `json:"AccessKey"`
+	SecretKey string `json:"SecretKey"`
+}
+
+// Setting reads the drive's settings from the selected database.
+func (c *Conn) Setting() (DriveSetting, error) {
+	var s DriveSetting
+	reply, err := c.Do("GET", "setting")
+	if err != nil {
+		return s, err
+	}
+	text, _ := reply.(string)
+	if text == "" {
+		return s, errors.New("the index holds no drive")
+	}
+	if err := json.Unmarshal([]byte(text), &s); err != nil {
+		return s, fmt.Errorf("the drive's settings are unreadable: %w", err)
+	}
+	return s, nil
+}
+
+// SaveFileBackup records the outcome of a copy of the drive's bucket where
+// every computer's status page can read it.
+func (c *Conn) SaveFileBackup(b FileBackup) error {
+	data, err := json.Marshal(b)
+	if err != nil {
+		return err
+	}
+	if _, err = c.Do("SELECT", fileBackupDB); err != nil {
+		return err
+	}
+	_, setErr := c.Do("SET", FileBackupKey, string(data))
+	if _, err = c.Do("SELECT", strconv.Itoa(c.db)); err != nil {
+		return err
+	}
+	return setErr
 }

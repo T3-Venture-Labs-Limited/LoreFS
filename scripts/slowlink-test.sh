@@ -58,6 +58,7 @@ docker run -d --name "$REDIS_NAME" -p "127.0.0.1:$REDIS_PORT:6379" redis:8-alpin
   redis-server --requirepass "$REDIS_PW" --maxmemory-policy noeviction --appendonly no >/dev/null || { echo "docker failed"; exit 1; }
 within 20 docker exec "$REDIS_NAME" redis-cli -a "$REDIS_PW" --no-auth-warning ping
 META_PASSWORD="$REDIS_PW" "$JFS" format --storage file --bucket "$T/store/" --trash-days 7 "redis://127.0.0.1:$REDIS_PORT/1" slow >"$T/format.log" 2>&1 || { cat "$T/format.log"; cleanup; exit 1; }
+META_PASSWORD="$REDIS_PW" "$JFS" config "redis://127.0.0.1:$REDIS_PORT/1" --changelog --changelog-max-age 24h --changelog-max-lines 100000 >>"$T/format.log" 2>&1
 (setsid "$ROOT/bin/slowlink" -listen "127.0.0.1:$PROXY_PORT" -to "127.0.0.1:$REDIS_PORT" -delay "$DELAY" >"$T/proxy.log" 2>&1 &)
 META_PASSWORD="$REDIS_PW" "$LORE" make-token --host 127.0.0.1 --port "$REDIS_PORT" --db 1 --drive slow --no-tls >"$T/token.near"
 META_PASSWORD="$REDIS_PW" "$LORE" make-token --host 127.0.0.1 --port "$PROXY_PORT" --db 1 --drive slow --no-tls >"$T/token.far"
@@ -88,35 +89,49 @@ start_helper far
 echo "saved while the helper was starting" >"$F/area3/topic2/part4/early.md"
 sleep 4
 js=$(as far "$LORE" status --json 2>/dev/null | jq -c '.checks[] | select(.id == "history")')
-echo "$js" | jq -e '.level == "ok" and (.detail | test("^starting: [0-9]+ folders"))' >/dev/null \
-  && ok "lorefs status says it is starting and how far it is, not that it is not running" || bad "lorefs status says the helper is starting" "$js"
-within 25 grep -q "still starting: [0-9]* folders looked at" "$T/far/helper.log" \
-  && ok "the helper's log says how far it is" || bad "the helper's log says how far it is" "$(cat "$T/far/helper.log")"
-if within 120 grep -q "recording versions" "$T/far/helper.log"; then
-  took=$((SECONDS-t0)); ok "it is recording versions after $took s (it was 290 s before the folders were handled side by side)"
-else bad "it is recording versions within 120 s" "$(tail -2 "$T/far/helper.log")"; fi
-grep -q "watching $FOLDERS folders" "$T/far/helper.log" && ok "every folder is watched" || bad "every folder is watched" "$(grep recording "$T/far/helper.log")"
+echo "$js" | jq -e '.level == "ok" and (.detail | test("recording versions|starting"))' >/dev/null \
+  && ok "lorefs status says it is recording (or starting), not that it is not running" || bad "lorefs status says the helper is recording" "$js"
+if within 60 grep -q "recording versions" "$T/far/helper.log"; then
+  took=$((SECONDS-t0)); ok "it is recording versions after $took s with $FOLDERS folders on the drive (it took 290 s when it had to look at every folder)"
+else bad "it is recording versions within 60 s" "$(tail -2 "$T/far/helper.log")"; fi
+within 20 grep -q "following the drive's change log" "$T/far/helper.log" && ok "it follows the drive's change log" || bad "it follows the drive's change log" "$(cat "$T/far/helper.log")"
 tr=$SECONDS
 within 150 eval '[ "$(versions far area3/topic2/part4/early.md)" = 1 ]' \
   && ok "a file saved while it was starting has its version ($((SECONDS-tr)) s after the helper was ready)" || bad "a file saved while it was starting has its version within 150 s" "$(versions far area3/topic2/part4/early.md)"
+tl=$SECONDS
 echo "saved after it was ready" >"$F/area7/topic1/part2/later.md"
-within 60 eval '[ "$(versions far area7/topic1/part2/later.md)" = 1 ]' \
-  && ok "a file saved afterwards has its version ($(as far "$LORE" status 2>/dev/null | grep 'Version history' | sed 's/^ *. Version history *//'))" || bad "a file saved afterwards has its version"
+within 120 eval '[ "$(versions far area7/topic1/part2/later.md)" = 1 ]' \
+  && ok "a file saved afterwards has its version ($((SECONDS-tl)) s, the connection adds half a second to each request)" || bad "a file saved afterwards has its version"
 far_versions() { as far "$LORE" log --json -n 2000 2>/dev/null | jq '[.[] | select(.m == "far" and .op == "save" and .version)] | length'; }
 within 60 eval '[ "$(far_versions)" -ge 2 ]'; sleep 5; n=$(far_versions)   # the activity log is written a few seconds behind
-[ "$n" = 2 ] && ok "it made versions of its own two files only, not of the 60 the other computer had recorded" || bad "a new computer leaves files from before it joined alone" "$n versions made by far"
+[ "$n" = 2 ] && ok "it made versions of its own two files only, not of the 60 the other computer had recorded" || bad "a new computer leaves files from before it joined alone" "$n versions made by far: $(as far "$LORE" log --json -n 2000 2>/dev/null | jq -r '[.[] | select(.m == "far" and .op == "save" and .version) | .path + " " + .t] | join("; ")')"
 
-section "Stopping it while it is still starting"
+section "Stopping it while it is starting"
 p=$(helper_pid far); kill "$p" 2>/dev/null; within 20 eval "! kill -0 $p 2>/dev/null"
 : >"$T/far/helper.log"; sleep 12   # let the kernel forget the folders, as after a pause
-start_helper far; sleep 6
+start_helper far; sleep 0.7
 p=$(helper_pid far)
-if [ -n "$p" ] && ! grep -q "recording versions" "$T/far/helper.log"; then
+if [ -n "$p" ]; then
   t0=$(date +%s.%N); kill -TERM "$p"
   if within 15 eval "! kill -0 $p 2>/dev/null"; then
-    ok "asked to stop in the middle of starting, it stops ($(awk -v s="$t0" -v e="$(date +%s.%N)" 'BEGIN{printf "%.1f", e-s}') s; it used to need killing after 90 s)"
-  else bad "asked to stop in the middle of starting, it stops within 15 s"; kill -9 "$p" 2>/dev/null; fi
-else bad "the helper was still starting when asked to stop" "pid '$p': $(tail -1 "$T/far/helper.log")"; fi
+    ok "asked to stop right after starting, it stops ($(awk -v s="$t0" -v e="$(date +%s.%N)" 'BEGIN{printf "%.1f", e-s}') s; it used to need killing after 90 s)"
+  else bad "asked to stop right after starting, it stops within 15 s"; kill -9 "$p" 2>/dev/null; fi
+else bad "the helper was running when asked to stop" "$(tail -1 "$T/far/helper.log")"; fi
+
+section "Stopping it while it catches up"
+# On start the helper walks the files changed since it last looked. With half a second
+# per request that walk takes a while; stopping must not wait for it.
+echo "changed while the helper was off" >"$F/area5/topic3/part1/off.md"
+: >"$T/far/helper.log"; start_helper far; sleep 6
+p=$(helper_pid far)
+if [ -n "$p" ] && ! grep -q "catch-up:" "$T/far/helper.log"; then
+  t0=$(date +%s.%N); kill -TERM "$p"
+  if within 15 eval "! kill -0 $p 2>/dev/null"; then
+    ok "asked to stop in the middle of its catch-up walk, it stops ($(awk -v s="$t0" -v e="$(date +%s.%N)" 'BEGIN{printf "%.1f", e-s}') s)"
+  else bad "asked to stop in the middle of its catch-up walk, it stops within 15 s"; kill -9 "$p" 2>/dev/null; fi
+else
+  echo "  (the catch-up walk had already finished after 6 s, so there was nothing to interrupt)"; [ -n "$p" ] && kill -TERM "$p" 2>/dev/null; sleep 3
+fi
 
 section "Stopping it while it removes old versions"
 : >"$T/far/helper.log"

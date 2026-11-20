@@ -9,7 +9,7 @@ import (
 // The documentation lists the built-in skip patterns. This keeps the two
 // from drifting apart.
 func TestDocumentedSkipListMatchesDefaults(t *testing.T) {
-	data, err := os.ReadFile("../../docs/history.md")
+	data, err := os.ReadFile("../../docs/version-history.md")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestDocumentedSkipListMatchesDefaults(t *testing.T) {
 	}
 	check := func(what string, documented, defaults []string) {
 		if strings.Join(documented, "\n") != strings.Join(defaults, "\n") {
-			t.Errorf("%s in docs/history.md differ from the defaults in skip.go:\n  docs:     %q\n  defaults: %q", what, documented, defaults)
+			t.Errorf("%s in docs/version-history.md differ from the defaults in skip.go:\n  docs:     %q\n  defaults: %q", what, documented, defaults)
 		}
 	}
 	check("folder patterns", lines(blocks[1]), DefaultSkipDirs)

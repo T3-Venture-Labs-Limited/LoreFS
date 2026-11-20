@@ -1,160 +1,331 @@
-// Package update brings the lorefs program on this computer up to date
-// from the copy of the repository it was installed from.
+// Package update brings the lorefs program on this computer up to date from
+// published releases: it reads the list of checksums of the newest release,
+// downloads this computer's archive, verifies it, and runs the archive's
+// own installer. Nothing is changed unless the archive checks out.
 package update
 
 import (
+	"archive/tar"
+	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
+	"strconv"
 	"strings"
-
-	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/config"
+	"time"
 )
 
-// ErrNoSource: this computer was not installed from a copy of the
-// repository (or the copy is gone), so there is nothing to update from.
-var ErrNoSource = errors.New("no repository to update from")
+// DefaultReleaseURL is where the newest release's files are published.
+const DefaultReleaseURL = "https://github.com/T3-Venture-Labs-Limited/LoreFS/releases/latest/download"
 
-// SourceFile holds the path of the repository copy this computer was
-// installed from. It is kept with the settings, and `lorefs leave` does
-// not remove it.
-func SourceFile() string { return filepath.Join(config.Dir(), "source") }
-
-// Remember records where the program was installed from. An empty dir
-// forgets it (an install from a release file).
-func Remember(dir string) error {
-	if dir == "" {
-		err := os.Remove(SourceFile())
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
+// ReleaseURL is where to look for the newest release. LOREFS_RELEASE_URL
+// overrides it (a mirror, or a folder served over HTTP for testing).
+func ReleaseURL() string {
+	if u := os.Getenv("LOREFS_RELEASE_URL"); u != "" {
+		return strings.TrimRight(u, "/")
 	}
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(config.Dir(), 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(SourceFile(), []byte(abs+"\n"), 0o600)
+	return DefaultReleaseURL
 }
 
-// Source returns the remembered repository copy, if it is still there.
-func Source() (string, error) {
-	data, err := os.ReadFile(SourceFile())
-	if err != nil {
-		return "", ErrNoSource
+// Release is one archive of the newest release.
+type Release struct {
+	Version string // without a leading "v"
+	Archive string // file name
+	SHA256  string
+}
+
+var archiveRe = regexp.MustCompile(`^lorefs-(.+)-linux-(amd64|arm64)\.tar\.gz$`)
+
+// Arch returns the release architecture name for this computer.
+func Arch() (string, error) {
+	switch runtime.GOARCH {
+	case "amd64", "arm64":
+		return runtime.GOARCH, nil
 	}
-	dir := strings.TrimSpace(string(data))
-	if dir == "" {
-		return "", ErrNoSource
+	return "", fmt.Errorf("there are no releases for this processor (%s)", runtime.GOARCH)
+}
+
+// ParseSums finds the archive for an architecture in the text of a
+// SHA256SUMS file ("<hash>  <file name>" per line). With several versions
+// listed, the highest wins.
+func ParseSums(sums, arch string) (Release, error) {
+	var best Release
+	for _, line := range strings.Split(sums, "\n") {
+		f := strings.Fields(line)
+		if len(f) != 2 {
+			continue
+		}
+		m := archiveRe.FindStringSubmatch(strings.TrimPrefix(f[1], "*"))
+		if m == nil || m[2] != arch || len(f[0]) != 64 {
+			continue
+		}
+		r := Release{Version: strings.TrimPrefix(m[1], "v"), Archive: strings.TrimPrefix(f[1], "*"), SHA256: strings.ToLower(f[0])}
+		if best.Archive == "" || Newer(best.Version, r.Version) {
+			best = r
+		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
-		return "", fmt.Errorf("%w: %s is no longer a copy of the repository", ErrNoSource, dir)
+	if best.Archive == "" {
+		return best, fmt.Errorf("the release lists no archive for %s", arch)
 	}
-	return dir, nil
+	return best, nil
+}
+
+var (
+	versionRe  = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$`)
+	describeRe = regexp.MustCompile(`-\d+-g[0-9a-f]+(-dirty)?$`)
+)
+
+type semver struct {
+	major, minor, patch int
+	pre                 string
+	ok                  bool
+}
+
+func parse(v string) semver {
+	v = strings.TrimSpace(v)
+	m := versionRe.FindStringSubmatch(v)
+	if m == nil {
+		return semver{}
+	}
+	n := func(s string) int { x, _ := strconv.Atoi(s); return x }
+	return semver{n(m[1]), n(m[2]), n(m[3]), m[4], true}
+}
+
+// compare returns -1, 0 or 1. A version with a pre-release part (rc.1) is
+// older than the same version without one.
+func compare(a, b semver) int {
+	for _, p := range [][2]int{{a.major, b.major}, {a.minor, b.minor}, {a.patch, b.patch}} {
+		if p[0] != p[1] {
+			if p[0] < p[1] {
+				return -1
+			}
+			return 1
+		}
+	}
+	switch {
+	case a.pre == b.pre:
+		return 0
+	case a.pre == "":
+		return 1
+	case b.pre == "":
+		return -1
+	}
+	// Compare dot-separated parts: numbers as numbers.
+	as, bs := strings.Split(a.pre, "."), strings.Split(b.pre, ".")
+	for i := 0; i < len(as) && i < len(bs); i++ {
+		x, ex := strconv.Atoi(as[i])
+		y, ey := strconv.Atoi(bs[i])
+		switch {
+		case ex == nil && ey == nil && x != y:
+			if x < y {
+				return -1
+			}
+			return 1
+		case as[i] != bs[i] && (ex != nil || ey != nil):
+			if as[i] < bs[i] {
+				return -1
+			}
+			return 1
+		}
+	}
+	return len(as) - len(bs)
+}
+
+// Newer reports whether candidate is a newer release than installed.
+// An installed version that is not a release number (a build from source
+// such as "dev" or "abc1234") is older than any release. A version built
+// after a release ("v0.2.0-3-gabc1234") counts as that release or later, so
+// it is not offered the release it was built from.
+func Newer(installed, candidate string) bool {
+	c := parse(candidate)
+	if !c.ok {
+		return false
+	}
+	installed = strings.TrimSpace(installed)
+	if d := describeRe.FindString(installed); d != "" {
+		if i := parse(strings.TrimSuffix(installed, d)); i.ok {
+			return compare(i, c) < 0 // built after its tag: only a later release is newer
+		}
+	}
+	i := parse(installed)
+	if !i.ok {
+		return true
+	}
+	return compare(i, c) < 0
 }
 
 // Options control Run.
 type Options struct {
-	Dir       string    // the repository copy
-	Installed string    // version of the program that is running
-	CheckOnly bool      // only say whether there is something newer
-	Out       io.Writer // progress, and the output of the build
+	Installed string
+	CheckOnly bool
+	Base      string       // release address; default ReleaseURL()
+	Out       io.Writer    // progress and the installer's output
+	HTTP      *http.Client // default: 60 s per request
+	Arch      string       // default: this computer's
 }
 
 // Result says what Run found and did.
 type Result struct {
-	From, To  string   // repository versions before and after
-	Changes   []string // one line per new change, newest first
-	Installed bool     // the build and the installer ran
+	Installed string // version that was running
+	Latest    string // newest release
+	Newer     bool
+	Done      bool // the archive was installed
 }
 
-// Run fetches the newest version, and unless CheckOnly is set, builds
-// and installs it. It only ever moves forward: a repository copy with
-// changes of its own that conflict is left alone, with git's message.
-func Run(opt Options) (Result, error) {
-	var res Result
-	for _, tool := range []string{"git", "make", "go"} {
-		if opt.CheckOnly && tool != "git" {
-			continue
-		}
-		if _, err := exec.LookPath(tool); err != nil {
-			return res, fmt.Errorf("updating needs the program %q, which is not installed", tool)
-		}
+func (o *Options) say(format string, a ...any) {
+	if o.Out != nil {
+		fmt.Fprintf(o.Out, format+"\n", a...)
 	}
-	g := func(args ...string) (string, error) {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = opt.Dir
-		out, err := cmd.CombinedOutput()
-		text := strings.TrimSpace(string(out))
-		if err != nil {
-			return text, fmt.Errorf("git %s: %s", strings.Join(args, " "), firstNonEmpty(text, err.Error()))
-		}
-		return text, nil
-	}
-	if _, err := g("fetch", "--quiet", "origin"); err != nil {
-		return res, fmt.Errorf("could not reach the repository: %w", err)
-	}
+}
 
-	// Where the newest version is: what the current branch follows, or
-	// the repository's main branch when the copy sits on one fixed
-	// version (after `git checkout <version>`).
-	branch, _ := g("symbolic-ref", "--quiet", "--short", "HEAD")
-	target, err := g("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
-	if branch == "" || err != nil {
-		target, err = g("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
-		if err != nil {
-			target = "origin/main"
+func (o *Options) get(ctx context.Context, url string, limit int64) ([]byte, error) {
+	hc := o.HTTP
+	if hc == nil {
+		hc = &http.Client{Timeout: 5 * time.Minute}
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("%s answered %s", url, resp.Status)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s is larger than expected", url)
+	}
+	return data, nil
+}
+
+// Run looks for a newer release and, unless CheckOnly is set, installs it.
+// It changes nothing on this computer unless the downloaded archive matches
+// the published checksum.
+func Run(ctx context.Context, o Options) (Result, error) {
+	res := Result{Installed: o.Installed}
+	base := o.Base
+	if base == "" {
+		base = ReleaseURL()
+	}
+	arch := o.Arch
+	if arch == "" {
+		var err error
+		if arch, err = Arch(); err != nil {
+			return res, err
 		}
 	}
-	res.From, _ = g("describe", "--tags", "--always", "--dirty")
-	if log, err := g("log", "--format=%h %s", "HEAD.."+target); err == nil && log != "" {
-		res.Changes = strings.Split(log, "\n")
+	sums, err := o.get(ctx, base+"/SHA256SUMS", 1<<20)
+	if err != nil {
+		return res, fmt.Errorf("could not reach the releases (%w); nothing was changed", err)
 	}
-	res.To = res.From
-	if opt.CheckOnly {
-		if len(res.Changes) > 0 {
-			res.To, _ = g("rev-parse", "--short", target)
-		}
+	rel, err := ParseSums(string(sums), arch)
+	if err != nil {
+		return res, err
+	}
+	res.Latest = rel.Version
+	res.Newer = Newer(o.Installed, rel.Version)
+	if !res.Newer || o.CheckOnly {
 		return res, nil
 	}
 
-	if len(res.Changes) > 0 {
-		if branch == "" {
-			// Leave the fixed version for the main branch.
-			if _, err := g("checkout", "--quiet", strings.TrimPrefix(target, "origin/")); err != nil {
-				return res, err
-			}
-		}
-		if _, err := g("merge", "--ff-only", "--quiet", target); err != nil {
-			return res, fmt.Errorf("the repository copy at %s has changes of its own, so it was left alone: %w", opt.Dir, err)
-		}
-		res.To, _ = g("describe", "--tags", "--always", "--dirty")
+	o.say("Downloading lorefs %s...", rel.Version)
+	data, err := o.get(ctx, base+"/"+rel.Archive, 512<<20)
+	if err != nil {
+		return res, fmt.Errorf("the download failed (%w); nothing was changed", err)
 	}
-	if len(res.Changes) == 0 && opt.Installed == res.From {
-		return res, nil // nothing new, and what is installed is what is here
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != rel.SHA256 {
+		return res, errors.New("the downloaded file does not match its published checksum, so it was not installed; nothing was changed")
 	}
-
-	for _, step := range [][]string{{"make", "build"}, {"./install.sh"}} {
-		cmd := exec.Command(step[0], step[1:]...)
-		cmd.Dir = opt.Dir
-		cmd.Stdout, cmd.Stderr = opt.Out, opt.Out
-		if err := cmd.Run(); err != nil {
-			return res, fmt.Errorf("%s failed (%v); the installed program was not changed by that step", strings.Join(step, " "), err)
-		}
+	dir, err := os.MkdirTemp("", "lorefs-update-*")
+	if err != nil {
+		return res, err
 	}
-	res.Installed = true
+	defer os.RemoveAll(dir)
+	root, err := extract(data, dir)
+	if err != nil {
+		return res, fmt.Errorf("the downloaded file could not be unpacked (%w); nothing was changed", err)
+	}
+	installer := filepath.Join(root, "install.sh")
+	if _, err := os.Stat(installer); err != nil {
+		return res, errors.New("the release has no installer; nothing was changed")
+	}
+	o.say("Installing...")
+	cmd := exec.CommandContext(ctx, installer)
+	cmd.Dir = root
+	cmd.Stdout, cmd.Stderr = o.Out, o.Out
+	if err := cmd.Run(); err != nil {
+		return res, fmt.Errorf("the installer failed (%w); the installed program was not changed by that step", err)
+	}
+	res.Done = true
 	return res, nil
 }
 
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
+// extract unpacks a .tar.gz into dir and returns the single top folder.
+func extract(data []byte, dir string) (string, error) {
+	gz, err := gzip.NewReader(strings.NewReader(string(data)))
+	if err != nil {
+		return "", err
 	}
-	return b
+	tr := tar.NewReader(gz)
+	top := ""
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		name := filepath.Clean(h.Name)
+		if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("unsafe path %q", h.Name)
+		}
+		first := strings.SplitN(name, string(filepath.Separator), 2)[0]
+		if top == "" {
+			top = first
+		} else if top != first {
+			return "", errors.New("the archive has more than one top folder")
+		}
+		target := filepath.Join(dir, name)
+		switch h.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return "", err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return "", err
+			}
+			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(h.Mode)&0o777|0o600)
+			if err != nil {
+				return "", err
+			}
+			if _, err := io.Copy(f, tr); err != nil {
+				f.Close()
+				return "", err
+			}
+			f.Close()
+		}
+	}
+	if top == "" {
+		return "", errors.New("the archive is empty")
+	}
+	return filepath.Join(dir, top), nil
 }

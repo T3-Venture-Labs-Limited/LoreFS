@@ -2,7 +2,7 @@ VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.1.
 COMMIT_TIME := $(shell git log -1 --format=%ct 2>/dev/null || echo 0)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commitTime=$(COMMIT_TIME)
 
-.PHONY: build test itest slowtest dist check clean
+.PHONY: build test itest slowtest dist release check clean
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/lorefs ./cmd/lorefs
@@ -23,8 +23,9 @@ check: test
 	scripts/check-private.sh
 	scripts/check-private-test.sh
 
-dist: build
-	scripts/make-dist.sh $(VERSION)
+# Both archives, the one-line installer and SHA256SUMS in dist/release.
+release:
+	scripts/make-release.sh $(VERSION)
 
 clean:
-	rm -rf bin dist/*.tar.gz dist/*.sha256
+	rm -rf bin dist

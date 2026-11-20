@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/assets"
 	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/config"
 	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/helper"
 	"github.com/T3-Venture-Labs-Limited/LoreFS/internal/index"
@@ -121,11 +122,14 @@ func gatherRest(cfg config.Config, in *Inputs) {
 		in.DiskFreePct = 100 * float64(fs.Bavail) / float64(fs.Blocks)
 	}
 
+	if data, err := os.ReadFile(filepath.Join(cfg.Folder, "AGENTS.md")); err == nil && in.Mounted {
+		in.RulesKnown, in.RulesVersion, in.RulesCurrent = true, assets.RulesVersionOf(string(data)), assets.RulesVersion
+	}
 	hb, fresh := helper.ReadHeartbeat()
 	in.HelperRunning = fresh
 	if fresh {
 		in.HelperSince, in.LastVersion = hb.Started, hb.LastVersion
-		in.HelperReady, in.HelperWatched = hb.Ready, hb.Watched
+		in.HelperReady, in.HelperLogRead = hb.Ready, hb.LogEntries
 	}
 }
 

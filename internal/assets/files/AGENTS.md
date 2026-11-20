@@ -1,6 +1,6 @@
 # LoreFS shared drive: rules for agents
 
-This folder is LoreFS, a drive shared by everyone in the company and by
+This folder is LoreFS, a drive shared by the people who use it and by
 their AI agents. The same files appear on every person's machine. A file
 you save here is visible to the others within a few seconds.
 
@@ -111,3 +111,5 @@ private copy:
 `lorefs status` shows whether the drive is healthy; `lorefs status --json`
 gives the same as data, and exits with 0 (healthy), 1 (warnings) or
 2 (not working).
+
+<!-- lorefs-rules-version: 1 -->

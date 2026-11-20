@@ -1,0 +1,26 @@
+LoreFS
+Copyright 2026 T3 Venture Labs Limited
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+LoreFS is not affiliated with, and is unrelated to, other projects named
+Lore. It is a layer of tools around JuiceFS and does not contain JuiceFS's
+source code.
+
+Third-party software distributed with, or run by, LoreFS
+---------------------------------------------------------
+
+JuiceFS (https://juicefs.com), version 1.4.2
+  Copyright Juicedata, Inc. Licensed under the Apache License, Version 2.0.
+  The release archives contain the unmodified `juicefs` program, which
+  LoreFS runs as a separate process. Its source code is at
+  https://github.com/juicedata/juicefs.
+
+Valkey (https://valkey.io)
+  Copyright Valkey contributors. Licensed under the BSD 3-Clause License.
+  `lorefs server init` writes a compose file that pulls the Valkey container
+  image (valkey/valkey) on the computer that runs the index. The image is not
+  part of the release archives.
+
+MinIO is used only by the test scripts in this repository, as a stand-in for
+an S3-compatible storage provider. It is not distributed with LoreFS.

@@ -126,8 +126,6 @@ func (t Token) check() error {
 		return fmt.Errorf("%w: bad index port", ErrInvalid)
 	case t.Password == "":
 		return fmt.Errorf("%w: no password", ErrInvalid)
-	case t.TLS && t.CA == "":
-		return fmt.Errorf("%w: no certificate", ErrInvalid)
 	}
 	return nil
 }

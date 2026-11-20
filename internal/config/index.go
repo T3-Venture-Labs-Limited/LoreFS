@@ -33,6 +33,10 @@ func (c Config) IndexURL() string {
 	return u.String()
 }
 
+// SetIndex sets the index from an address such as
+// "rediss://index.example.net:6379/1" or "sqlite3:///path/meta.db".
+func (c *Config) SetIndex(raw string) error { return c.setIndex(raw) }
+
 // setIndex reads an address written by IndexURL.
 func (c *Config) setIndex(raw string) error {
 	if rest, ok := strings.CutPrefix(raw, SchemeSQLite+"://"); ok {

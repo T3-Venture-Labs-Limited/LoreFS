@@ -63,7 +63,6 @@ func TestMissingFields(t *testing.T) {
 		"host":     func(k *Token) { k.Host = "" },
 		"port":     func(k *Token) { k.Port = 0 },
 		"password": func(k *Token) { k.Password = "" },
-		"ca":       func(k *Token) { k.CA = "" },
 	} {
 		k := sample()
 		mut(&k)
@@ -130,5 +129,20 @@ func TestCutOffCodeIsRefused(t *testing.T) {
 		if _, err := Decode(s[:n]); !errors.Is(err, ErrInvalid) {
 			t.Errorf("cut at %d: got %v", n, err)
 		}
+	}
+}
+
+// An index with a certificate from a public authority needs no certificate
+// in the code: the computer's own list is used.
+func TestEncryptedTokenWithoutCertificate(t *testing.T) {
+	k := sample()
+	k.CA = ""
+	s, err := Encode(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Decode(s)
+	if err != nil || got.CA != "" || !got.TLS {
+		t.Fatalf("%+v %v", got, err)
 	}
 }

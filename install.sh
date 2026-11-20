@@ -31,13 +31,16 @@ else fail "The lorefs program is missing from $HERE. Download the release again.
 if [ -x "$HERE/get-juicefs.sh" ]; then GET_JFS="$HERE/get-juicefs.sh"
 else GET_JFS="$HERE/scripts/get-juicefs.sh"; fi
 
-# Download and verify JuiceFS into a scratch folder first, so that a bad
-# download leaves the machine untouched.
+# JuiceFS comes in the release archive; from a source copy it is downloaded
+# and verified. Either way it goes into a scratch folder first, so that a
+# bad file leaves the machine untouched.
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
-if [ -x "$BIN/juicefs" ]; then cp -p "$BIN/juicefs" "$stage/juicefs"; fi
-"$GET_JFS" "$stage" || fail "JuiceFS could not be downloaded and verified. Nothing was installed."
-
+if [ -x "$HERE/juicefs" ]; then cp -p "$HERE/juicefs" "$stage/juicefs"
+else
+  if [ -x "$BIN/juicefs" ]; then cp -p "$BIN/juicefs" "$stage/juicefs"; fi
+  "$GET_JFS" "$stage" || fail "JuiceFS could not be downloaded and verified. Nothing was installed."
+fi
 mkdir -p "$BIN"
 changed=0
 put() { # put <source> <name>: replace only if different, in one step
@@ -50,11 +53,6 @@ put() { # put <source> <name>: replace only if different, in one step
 }
 put "$stage/juicefs" juicefs
 put "$SRC_LORE" lorefs
-
-# Remember where this was installed from, so that `lorefs update` can fetch
-# and build the next version there. A release file has no such place.
-if [ -d "$HERE/.git" ]; then "$BIN/lorefs" update --remember "$HERE" || true
-else "$BIN/lorefs" update --forget || true; fi
 
 # Service files and the file-manager entry come from inside lorefs itself.
 units="$("$BIN/lorefs" setup-files || true)"

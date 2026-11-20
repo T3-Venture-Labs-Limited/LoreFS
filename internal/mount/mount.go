@@ -3,6 +3,7 @@
 package mount
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -25,7 +26,10 @@ func IndexURL(c config.Config) string {
 	}
 	q := url.Values{}
 	if c.IndexTLS {
-		q.Set("tls-ca-cert-file", config.CAFile())
+		// A certificate from a public authority needs no file of ours.
+		if _, err := os.Stat(config.CAFile()); err == nil {
+			q.Set("tls-ca-cert-file", config.CAFile())
+		}
 	}
 	if c.ClientCache {
 		q.Set("client-cache", "true")
@@ -51,7 +55,7 @@ func Args(c config.Config) []string {
 		"--cache-dir", c.CacheDir,
 		"--cache-size", strconv.Itoa(c.CacheLimitMB),
 		"--free-space-ratio", "0.1",
-		"--backup-meta", "1h",
+		"--backup-meta", backupMetaEvery(),
 		"--io-retries", "8",
 		// Act as the drive's owner on every computer, whatever this
 		// computer's user numbers are (drive-mount spec).
@@ -75,6 +79,15 @@ func Args(c config.Config) []string {
 	return args
 }
 
+// backupMetaEvery is how often a mounted computer writes a copy of the
+// index into the bucket. Tests shorten it with LOREFS_BACKUP_META.
+func backupMetaEvery() string {
+	if v := os.Getenv("LOREFS_BACKUP_META"); v != "" {
+		return v
+	}
+	return "1h"
+}
+
 // Target returns the index login for this machine.
 func Target(c config.Config) (index.Target, error) {
 	if c.IsLocal() {
@@ -86,7 +99,7 @@ func Target(c config.Config) (index.Target, error) {
 	}
 	t := index.Target{Host: c.IndexHost, Port: c.IndexPort, DB: c.IndexDB, TLS: c.IndexTLS, Password: pw}
 	if c.IndexTLS {
-		if t.CAPEM, err = os.ReadFile(config.CAFile()); err != nil {
+		if t.CAPEM, err = os.ReadFile(config.CAFile()); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return t, err
 		}
 	}
