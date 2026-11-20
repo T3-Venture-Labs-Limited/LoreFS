@@ -78,6 +78,7 @@ type Timings struct {
 	Walk           time.Duration // catch-up walk
 	WalkNoLog      time.Duration // catch-up walk when the drive has no change log
 	LogCheck       time.Duration // look again at the drive's change-log setting
+	LogReload      time.Duration // after the log was turned on, walk once more: a mount reads the setting only now and then
 	Health         time.Duration
 	DownAfter      time.Duration // unhealthy this long before notifying
 }
@@ -113,6 +114,7 @@ func DefaultTimings() Timings {
 		Walk:      envDuration("LOREFS_WALK", 6*time.Hour),
 		WalkNoLog: envDuration("LOREFS_WALK_NO_LOG", 10*time.Minute),
 		LogCheck:  envDuration("LOREFS_LOG_CHECK", 5*time.Minute),
+		LogReload: envDuration("LOREFS_LOG_RELOAD", time.Minute),
 		Health:    envDuration("LOREFS_HEALTH", time.Minute),
 		DownAfter: envDuration("LOREFS_DOWN_AFTER", 2*time.Minute),
 	}
@@ -172,7 +174,13 @@ func Run(ctx context.Context, cfg config.Config) error {
 	go func() {
 		if err := EnsureDrive(cfg); err != nil {
 			logger.Printf("preparing the drive: %v", err)
+			return
 		}
+		// The rules file may have just been written by this computer, before
+		// anything was following the change log: give it its first version
+		// (nothing happens if it already has one for this content), so that a
+		// computer that joins later does not make one for it.
+		store.Record("AGENTS.md")
 	}()
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -632,9 +640,15 @@ func (h *helper) recordLoop(ctx context.Context) {
 		}
 		h.mu.Lock()
 		changed := on != h.changeLog || !asked
+		turnedOn := on && !h.changeLog && asked
 		h.changeLog = on
 		h.mu.Unlock()
 		asked = true
+		if turnedOn {
+			// The mounts read the drive's settings again only now and then, so
+			// changes made just after the log was turned on may not be in it.
+			time.AfterFunc(h.t.LogReload, func() { h.CatchUp("the change log was turned on a little while ago") })
+		}
 		switch {
 		case on && cancelRec == nil:
 			h.log.Printf("following the drive's change log")

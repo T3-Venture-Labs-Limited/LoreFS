@@ -45,9 +45,10 @@ machine=$(od -An -t u2 -j 18 -N 2 "$T/x/lorefs-0.0.2-linux-arm64/lorefs" | tr -d
 [ "$machine" = 183 ] && ok "the arm64 program is an ARM64 executable (ELF machine 183)" || bad "the arm64 program is an ARM64 executable" "ELF machine $machine"
 [ "$(od -An -t u2 -j 18 -N 2 "$T/x/lorefs-0.0.2-linux-arm64/juicefs" | tr -d ' ')" = 183 ] && ok "and so is its juicefs" || bad "the arm64 juicefs is an ARM64 executable"
 
-serve() { # serve DIR
-  [ -f "$T/server.pid" ] && kill "$(cat "$T/server.pid")" 2>/dev/null; sleep 0.5
-  (cd "$1" && python3 -m http.server "$PORT" --bind 127.0.0.1 >"$T/http.log" 2>&1 & echo $! >"$T/server.pid")
+serve() { # serve DIR: stop the old server, wait for its port to close, start the new one
+  if [ -f "$T/server.pid" ]; then kill "$(cat "$T/server.pid")" 2>/dev/null; rm -f "$T/server.pid"; fi
+  local end=$((SECONDS+10)); while curl -s -o /dev/null "http://127.0.0.1:$PORT/" 2>/dev/null && [ $SECONDS -lt $end ]; do sleep 0.2; done
+  (cd "$1" && exec python3 -m http.server "$PORT" --bind 127.0.0.1 >"$T/http.log" 2>&1) & echo $! >"$T/server.pid"
   within 10 curl -sf "http://127.0.0.1:$PORT/SHA256SUMS" >/dev/null
 }
 URL="http://127.0.0.1:$PORT"
@@ -70,14 +71,14 @@ out=$(E "$h" sh "$R1/install.sh" 2>&1); code=$?
 mkdir -p "$T/bin-nofuse"; for t in sh curl tar sha256sum grep sort tail mktemp rm uname cat dirname printf head cut dd; do p=$(command -v $t) && ln -sf "$p" "$T/bin-nofuse/$t"; done
 serve "$R1"; h=$(newhome nofuse)
 out=$(E "$h" PATH="$T/bin-nofuse" sh "$R1/install.sh" 2>&1); code=$?
-[ $code -ne 0 ] && echo "$out" | grep -q "needs FUSE 3" && echo "$out" | grep -q "install fuse3" && [ -z "$(ls -A "$h")" ] && ok "without FUSE 3 it stops before installing and prints the command to run" || bad "missing FUSE 3 is explained" "exit $code: $out"
+[ $code -ne 0 ] && echo "$out" | grep -q "needs FUSE 3" && echo "$out" | grep -q "sudo .*fuse3" && [ -z "$(ls -A "$h")" ] && ok "without FUSE 3 it stops before installing and prints the command to run" || bad "missing FUSE 3 is explained" "exit $code: $out"
 
 section "lorefs update"
 L="$h/.local/bin/lorefs"
 h=$(newhome upd)
 serve "$R1"; E "$h" sh "$R1/install.sh" >/dev/null 2>&1
 L="$h/.local/bin/lorefs"
-mkdir -p "$h/.config/lorefs"; echo 'drive_name = "kept"' >"$h/.config/lorefs/config.toml"
+mkdir -p "$h/.config/lorefs"; echo '# kept across the update' >"$h/.config/lorefs/skip"
 out=$(E "$h" "$L" update --check 2>&1); code=$?
 [ $code -eq 0 ] && echo "$out" | grep -q "newest version" && ok "with the newest release installed, update --check says so" || bad "update --check on the newest release" "exit $code: $out"
 out=$(E "$h" "$L" update 2>&1); code=$?
@@ -93,7 +94,7 @@ out=$(E "$h" "$L" update 2>&1); code=$?
 [ $code -ne 0 ] && echo "$out" | grep -q "does not match" && [ "$(sha256sum "$L" | cut -d' ' -f1)" = "$before" ] && ok "a corrupted archive changes nothing" || bad "a corrupted archive changes nothing" "exit $code: $out"
 # A newer release: installed while a program is reading a file on a drive.
 serve "$R2"
-E "$h" "$L" create --local --name reading --folder "$h/Lore" --no-connect >/dev/null 2>&1
+E "$h" "$L" create --local --name reading --folder "$h/Lore" >/dev/null 2>&1
 export HOME="$h" LOREFS_CONFIG_DIR="$h/.config/lorefs" LOREFS_STATE_DIR="$h/.local/state/lorefs" LOREFS_JUICEFS="$h/.local/bin/juicefs" LOREFS_NO_SYSTEMD=1
 "$L" mount pre; "$L" mount run >"$h/mount.log" 2>&1 &
 within 40 test -e "$h/Lore/.config" && ok "a trial drive is mounted from the installed release" || bad "a trial drive is mounted" "$(tail -3 "$h/mount.log")"
@@ -105,7 +106,7 @@ out=$(LOREFS_RELEASE_URL="$URL" "$L" update --check 2>&1); code=$?
 [ $code -eq 1 ] && echo "$out" | grep -q "0.0.2" && ok "update --check reports the newer release (exit 1)" || bad "update --check reports the newer release" "exit $code: $out"
 out=$(LOREFS_RELEASE_URL="$URL" "$L" update 2>&1); code=$?
 [ $code -eq 0 ] && "$L" version 2>&1 | grep -q 'v0.0.2' && ok "update installs the newer release in one step ($("$L" version 2>&1 | head -1))" || bad "update installs the newer release" "exit $code: $out"
-grep -q 'drive_name = "kept"' "$h/.config/lorefs/config.toml" && ok "the settings are kept" || bad "the settings are kept"
+grep -q 'kept across the update' "$h/.config/lorefs/skip" && ok "the settings are kept" || bad "the settings are kept"
 wait "$reader"; read -r n fails <"$h/reader.out"
 [ "$fails" = 0 ] && [ "$n" -gt 50 ] && ok "a program reading a file on the drive kept working throughout ($n reads, none failed)" || bad "a reader kept working throughout" "$fails of $n reads failed"
 [ -e "$h/Lore/.config" ] && ok "the drive stayed connected (it is not restarted by an update)" || bad "the drive stayed connected"

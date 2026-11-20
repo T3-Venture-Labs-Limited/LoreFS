@@ -126,11 +126,11 @@ func Create(ctx context.Context, o Options) (Result, error) {
 		TLS: cfg.IndexTLS, Password: o.IndexPass, CAPEM: o.IndexCA}, timeout)
 	switch {
 	case errors.Is(err, index.ErrPassword):
-		return res, fmt.Errorf("%w. Check the password.", ErrIndexPassword)
+		return res, fmt.Errorf("%w. Check the password", ErrIndexPassword)
 	case errors.Is(err, index.ErrCertificate):
-		return res, fmt.Errorf("%w (%v). If the server uses its own certificate authority, give its certificate file.", ErrIndexCertificate, err)
+		return res, fmt.Errorf("%w (%v). If the server uses its own certificate authority, give its certificate file", ErrIndexCertificate, err)
 	case err != nil:
-		return res, fmt.Errorf("%w (%v). Check the address and that this computer may connect to it.", ErrIndexUnreachable, err)
+		return res, fmt.Errorf("%w (%v). Check the address and that this computer may connect to it", ErrIndexUnreachable, err)
 	}
 	name, formatted := conn.IsFormatted()
 	n, _ := conn.KeyCount()

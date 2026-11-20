@@ -106,6 +106,11 @@ far_versions() { as far "$LORE" log --json -n 2000 2>/dev/null | jq '[.[] | sele
 within 60 eval '[ "$(far_versions)" -ge 2 ]'; sleep 5; n=$(far_versions)   # the activity log is written a few seconds behind
 [ "$n" = 2 ] && ok "it made versions of its own two files only, not of the 60 the other computer had recorded" || bad "a new computer leaves files from before it joined alone" "$n versions made by far: $(as far "$LORE" log --json -n 2000 2>/dev/null | jq -r '[.[] | select(.m == "far" and .op == "save" and .version) | .path + " " + .t] | join("; ")')"
 
+section "lorefs selftest on the far computer"
+out=$(as far "$LORE" selftest --small 5 --settle 3s 2>&1); code=$?
+echo "$out" | grep -q "One request to the index" && ok "selftest prints the time of one request to the index ($(echo "$out" | grep 'One request' | grep -o '[0-9]* ms'))" || bad "selftest prints the time of one request to the index" "$out"
+echo "$out" | grep -q "distance to the index" && ok "and says that the distance to the index is the reason" || bad "selftest names the distance to the index" "$out"
+
 section "Stopping it while it is starting"
 p=$(helper_pid far); kill "$p" 2>/dev/null; within 20 eval "! kill -0 $p 2>/dev/null"
 : >"$T/far/helper.log"; sleep 12   # let the kernel forget the folders, as after a pause

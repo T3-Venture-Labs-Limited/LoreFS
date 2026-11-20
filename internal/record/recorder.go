@@ -52,7 +52,6 @@ type Recorder struct {
 
 	read    atomic.Int64 // the last version read
 	started atomic.Bool
-	caught  atomic.Bool // the log has been read up to its end once
 	entries atomic.Int64
 	restart atomic.Int64
 }

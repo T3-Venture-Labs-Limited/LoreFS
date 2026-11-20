@@ -46,6 +46,7 @@ func cmdSelftest(args []string) error {
 	fs := flags("selftest")
 	asJSON := fs.Bool("json", false, "output for programs")
 	wait := fs.Duration("settle", 65*time.Second, "how long to wait so the listing is not answered from memory")
+	small := fs.Int("small", 100, "how many small files to write (fewer makes the test quicker, and its results less comparable)")
 	if _, err := parse(fs, args); err != nil {
 		return err
 	}
@@ -65,13 +66,13 @@ func cmdSelftest(args []string) error {
 		}
 	}
 
-	say("Preparing 100 small files and one 5 MB file on the drive...\n")
+	say("Preparing %d small files and one 5 MB file on the drive...\n", *small)
 	listDir := filepath.Join(dir, "listing")
 	if err := os.MkdirAll(listDir, 0o755); err != nil {
 		return err
 	}
 	startWrite := time.Now()
-	for i := 0; i < 100; i++ {
+	for i := 0; i < *small; i++ {
 		if err := os.WriteFile(filepath.Join(listDir, fmt.Sprintf(".lorefs-selftest-%03d.md", i)), []byte("selftest\n"), 0o644); err != nil {
 			return err
 		}
@@ -169,11 +170,18 @@ func cmdSelftest(args []string) error {
 		if res.IndexMS > 0 {
 			fmt.Printf("    One request to the index        %7.0f ms\n", res.IndexMS)
 		}
-		if (!res.ListingOK || !res.FirstOpenOK || !res.RepeatOpenOK) && res.IndexMS > 150 {
+		if res.IndexMS > 150 {
 			fmt.Println()
-			fmt.Printf("The distance to the index is the cause: every request to it takes %.0f ms here, and listing a folder\n", res.IndexMS)
-			fmt.Println("or opening a file takes several. A VPN that sends traffic the long way round, or an index on another")
-			fmt.Println("continent, does this. Let connections to the index bypass the VPN, or run the index nearer.")
+			missed := !res.ListingOK || !res.FirstOpenOK || !res.RepeatOpenOK
+			if missed {
+				fmt.Printf("The distance to the index is the cause: every request to it takes %.0f ms here, and listing a folder\n", res.IndexMS)
+				fmt.Println("or opening a file takes several.")
+			} else {
+				fmt.Printf("The distance to the index is long: every request to it takes %.0f ms here. The targets were met, but folders\n", res.IndexMS)
+				fmt.Println("with many files will feel slow, and saving files takes several requests each.")
+			}
+			fmt.Println("A VPN that sends traffic the long way round, or an index on another continent, does this.")
+			fmt.Println("Let connections to the index bypass the VPN, or run the index nearer.")
 		}
 	}
 	if !res.ListingOK || !res.FirstOpenOK || !res.RepeatOpenOK {

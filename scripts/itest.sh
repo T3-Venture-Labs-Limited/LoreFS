@@ -327,9 +327,11 @@ echo "$log" | grep -q "alpha" && echo "$log" | grep -q "beta" && echo "$log" | g
   && ok "the activity log lists saves, deletions and restores from both computers" || bad "the activity log lists events from both computers" "$(echo "$log" | head -5)"
 
 # Out of the way.
+# shellcheck disable=SC2010
 ls "$A" | grep -q lorefs && bad "history storage is hidden from a normal listing" || ok "history storage is hidden from a normal listing"
 timeout 30 grep -rIl "third draft" "$A" >"$T/grep.out" 2>/dev/null; rc=$?
 [ "$rc" != 124 ] && ok "a plain recursive search over the whole drive finishes (no file that never ends)" || bad "a plain recursive search over the whole drive finishes"
+# shellcheck disable=SC2010
 ls -a "$A" | grep -q -E '^\.(accesslog|stats|config|control)$' && bad "the drive's internal files are hidden from listings" || ok "the drive's internal files are hidden from listings"
 if command -v rg >/dev/null; then rg -l "third draft" "$A" 2>/dev/null | grep -q '\.lorefs' && bad "a default search (ripgrep) does not look into history" || ok "a default search (ripgrep) does not look into history"; fi
 
@@ -404,6 +406,9 @@ echo "$js" | jq -e '.checks[] | select(.id == "change-log") | .level == "ok" and
   && ok "status reads the change-log setting through juicefs status" || bad "status reads the change-log setting through juicefs status" "$(echo "$js" | jq -c '.checks[] | select(.id == "change-log")')"
 echo "$js" | jq -e '.checks[] | select(.id == "index-memory" and .level == "ok")' >/dev/null \
   && ok "the Redis-compatible checks (memory, response time) work on $INDEX_IMAGE" || bad "the Redis-compatible checks work on $INDEX_IMAGE"
+out=$(lore_a selftest --small 20 --settle 3s 2>&1); code=$?
+[ "$code" = 0 ] && echo "$out" | grep -q "One request to the index" && ! echo "$out" | grep -q "distance to the index" \
+  && ok "selftest meets its targets next to the index and prints the time of one request ($(echo "$out" | grep 'One request' | grep -o '[0-9]* ms'))" || bad "selftest next to the index" "exit $code: $out"
 # Which version of lorefs each computer runs.
 echo "$js" | jq -e '.checks[] | select(.id == "program") | .level == "ok" and (.detail | test("the same on all 2 computers"))' >/dev/null \
   && ok "status says both computers run the same version of lorefs" || bad "status says both computers run the same version of lorefs" "$(echo "$js" | jq -c '.checks[] | select(.id == "program")')"
