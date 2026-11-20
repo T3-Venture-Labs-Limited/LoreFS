@@ -7,8 +7,10 @@
 # Usage: scripts/changelog-experiment.sh [--keep]     (about 1 minute)
 #   DELAY=255ms   add this delay each way to the second computer's index
 #                 connection (510 ms per request), as in slowlink-test.sh
-#   FILES=0       also copy this many small files at once, eight at a time,
-#                 and check that none is missed
+#   FILES=0       also write this many small files at once, eight at a
+#                 time, and check that none is missed
+#   BULK_SIDE=a   which computer writes them (b is the slow one with DELAY)
+#   BULK_THREADS=8
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 JFS="$ROOT/.tools/juicefs"
@@ -123,14 +125,25 @@ raw2=$(sed -n "$(( $(cut -d' ' -f1 <<<"${marks[0]}") + 1 )),$(cut -d' ' -f1 <<<"
 echo "  note: creating a file with content printed $raw2 save line(s)"
 
 if [ "$FILES" -gt 0 ]; then
-  section "Bulk: $FILES small files, eight at a time"
-  mkdir -p "$A/bulk"; export A
-  seq 1 "$FILES" | xargs -P 8 -I{} sh -c 'd="$A/bulk/f$(( {} % 300 ))"; mkdir -p "$d"; echo {} > "$d/file-{}.md"'
-  want="$FILES"; end=$((SECONDS+120))
-  while [ $SECONDS -lt $end ]; do got=$(grep -c ' save bulk/.*file-[0-9]*\.md$' "$T/probe-a.out" 2>/dev/null); got=${got:-0}; [ "$(grep ' save bulk/' "$T/probe-a.out" | sed -E 's/^ *[0-9.]+ save //' | sort -u | wc -l)" -ge "$want" ] && break; sleep 1; done
-  distinct=$(grep ' save bulk/' "$T/probe-a.out" | sed -E 's/^ *[0-9.]+ save //' | sort -u | wc -l)
-  [ "$distinct" -ge "$want" ] && ok "every one of $FILES files was reported (${distinct} distinct paths)" || bad "every one of $FILES files was reported" "only $distinct distinct paths"
-  grep -q '^[ 0-9.]*gap ' "$T/probe-a.out" && bad "no gap in the versions read" "$(grep ' gap ' "$T/probe-a.out" | head -2)" || ok "no gap in the versions read"
+  SIDE="${BULK_SIDE:-a}"; section "Bulk: $FILES small files written through computer $SIDE, ${BULK_THREADS:-8} at a time"
+  D="$T/$SIDE"; P="$T/probe-$SIDE.out"; export D
+  # One folder per worker: creating files in one folder is done one at a
+  # time by the kernel, which over a slow connection takes seconds each.
+  for k in $(seq 0 19); do mkdir -p "$D/bulk/p$k"; done; sleep 2
+  t0=$SECONDS
+  seq 1 "$FILES" | xargs -P "${BULK_THREADS:-8}" -I{} sh -c 'echo {} > "$D/bulk/p$(( {} % 20 ))/file-{}.md"'
+  wrote=$((SECONDS - t0)); lastwrite=$(date +%s)
+  end=$((SECONDS+240)); distinct=0
+  while [ $SECONDS -lt $end ]; do
+    distinct=$(grep ' save bulk/' "$P" | sed -E 's/^ *[0-9.]+ save //' | sort -u | wc -l)
+    [ "$distinct" -ge "$FILES" ] && break; sleep 1
+  done
+  behind=$(( $(date +%s) - lastwrite ))
+  echo "  writing took $wrote s; the reader had every path $behind s after the last write returned"
+  [ "$distinct" -ge "$FILES" ] && ok "every one of $FILES files was reported (${distinct} distinct paths)" || bad "every one of $FILES files was reported" "only $distinct distinct paths"
+  # Each file must be reported under its own path, with no wrong ones.
+  wrong=$(grep ' save bulk/' "$P" | sed -E 's/^ *[0-9.]+ save //' | grep -v -E '^bulk/p[0-9]+/file-[0-9]+\.md$' | head -3)
+  [ -z "$wrong" ] && ok "every reported path is a file that was written" || bad "every reported path is a file that was written" "$wrong"
 fi
 
 grep -q ' gap ' "$T/probe-a.out" "$T/probe-b.out" && bad "no gap in the versions read" || ok "no gap in the versions read"
