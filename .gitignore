@@ -1,0 +1,19 @@
+# build output and downloaded tools
+/bin/
+/dist/
+/.tools/
+/tmp/
+
+# anything shaped like a secret
+*.pem
+*.key
+*.crt
+secret.env
+*.token
+join-token*
+b2-backup.env
+spaces.env
+backend.env
+
+# planning notes for the maintainers' own work; not published
+/openspec/
