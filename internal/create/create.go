@@ -232,10 +232,10 @@ func explainFormat(out, bucket string) error {
 	low := strings.ToLower(out)
 	line := lastLine(out)
 	switch {
-	case containsAny(low, "accessdenied", "access denied", "invalidaccesskey", "signaturedoesnotmatch", "forbidden", "invalid access key", "403", "unauthorized"):
-		return fmt.Errorf("%w. Check the access key and secret key, and that the key may write to the bucket. Nothing was created (%s)", ErrStorageKey, line)
 	case containsAny(low, "not empty", "already exist", "already formatted", "volume uuid"):
 		return fmt.Errorf("%w. Nothing was changed. Use an empty bucket, or `lorefs join` if that drive is the one you want (%s)", ErrStorageInUse, line)
+	case containsAny(low, "accessdenied", "access denied", "invalidaccesskey", "signaturedoesnotmatch", "forbidden", "invalid access key", "403", "unauthorized"):
+		return fmt.Errorf("%w. Check the access key and secret key, and that the key may write to the bucket. Nothing was created (%s)", ErrStorageKey, line)
 	case containsAny(low, "no such host", "connection refused", "request send failed", "timeout", "timed out", "dial tcp", "no route", "i/o timeout", "eof"):
 		return fmt.Errorf("%w (%s). Check the address %s and this computer's connection. Nothing was created", ErrStorageReach, line, bucket)
 	}
