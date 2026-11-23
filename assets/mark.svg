@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="LoreFS">
+  <rect width="128" height="128" rx="28" fill="#0B0B0D"/>
+  <rect x="26" y="30" width="76" height="16" rx="5" fill="#F2B84B" opacity=".28"/>
+  <rect x="26" y="52" width="76" height="16" rx="5" fill="#F2B84B" opacity=".55"/>
+  <rect x="26" y="74" width="76" height="24" rx="6" fill="#F2B84B"/>
+  <path d="M40 86h24" stroke="#0B0B0D" stroke-width="5" stroke-linecap="round"/>
+</svg>

@@ -357,7 +357,7 @@ func (r Report) Text() string {
 	default:
 		sb.WriteString("The drive is not working properly. See the lines marked ✗ above.\n")
 	}
-	fmt.Fprintf(&sb, "\nlore %s · JuiceFS %s\n", r.Programs["lorefs"], r.Programs["juicefs"])
+	fmt.Fprintf(&sb, "\nlorefs %s · JuiceFS %s\n", r.Programs["lorefs"], r.Programs["juicefs"])
 	return sb.String()
 }
 

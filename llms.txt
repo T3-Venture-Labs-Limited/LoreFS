@@ -1,0 +1,19 @@
+# LoreFS
+
+> LoreFS is a free, open-source, self-hosted shared drive for small teams and their AI agents. It mounts a folder (`~/Lore`) that looks the same on every Linux computer, keeps a version of every save, gives agents private copy-on-write sandboxes, and reports its own health in plain words. Files live in the team's own S3-compatible bucket; names and folders live in a Redis-compatible index. It is built on JuiceFS. Command: `lorefs`. Apache-2.0.
+
+## Docs
+
+- [README](README.md): what it is, install, try it, share a drive, commands, FAQ
+- [Agent skill](skills/lorefs/SKILL.md): how an AI agent should use the drive from the command line
+- [AGENTS.md](AGENTS.md): codebase map for contributors and coding agents
+- [Creating a drive](docs/creating-a-drive.md), [Running an index](docs/running-an-index.md), [Backup and restore](docs/backup-and-restore.md), [Version history](docs/version-history.md)
+
+## Key facts
+
+- Platform: Linux with FUSE 3 (macOS and Windows not supported yet)
+- Needs for a shared drive: an S3-compatible bucket and a Redis-compatible index (Redis or Valkey) with encrypted connections; `lorefs server init` writes a Valkey setup
+- Trial drive: `lorefs create --local` (no account or network)
+- Version history: every save, any program, 30 days; deleted files 7 days in the trash; videos are not versioned
+- Agents: `lorefs sandbox create|diff|apply|remove`, `--json` on status, history, log, trash, pins and sandbox list
+- Not supported: merging simultaneous edits, a web interface, sharing links
