@@ -1,0 +1,42 @@
+<!doctype html><meta charset=utf-8><style>body{margin:0;background:#0B0B0D;font-family:"JetBrainsMono Nerd Font","DejaVu Sans Mono",monospace}
+.w{width:1160px;margin:30px auto;border-radius:14px;background:#131316;border:1px solid #2a2a30;box-shadow:0 20px 60px #000a;overflow:hidden}
+.b{height:38px;background:#1b1b20;display:flex;align-items:center;padding:0 16px;gap:8px;color:#8a8a94;font-size:13px}
+.b i{width:12px;height:12px;border-radius:50%;display:inline-block}
+pre{margin:0;padding:22px 28px 26px;color:#e8e6df;font-size:15.5px;line-height:1.5;font-family:inherit}
+.p{color:#F2B84B}.g{color:#6EE7A8}.r{color:#FF7B8A}.c{color:#7FB4FF}.d{color:#6f6f7a}.a{color:#F2B84B}</style><div class=w><div class=b><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span style="margin-left:12px">lorefs</span></div><pre><span class="p">$</span> lorefs create --local
+The trial drive "demo" was created on this computer.
+Done. The trial drive is at <span class="a">~/Lore</span>.
+
+<span class="p">$</span> echo "Starter at $9, team at $24." &gt; ~/Lore/research/pricing.md   <span class="d"># saved twice</span>
+<span class="p">$</span> lorefs history --list research/pricing.md
+Versions of research/pricing.md (newest first)
+
+  #  saved                              by                   size
+  1  Mon 10:41 (moments ago)            laptop               63 B
+  2  Mon 10:41 (moments ago)            laptop               45 B
+
+To go back to one: lorefs restore &quot;research/pricing.md&quot; &lt;number&gt;
+
+<span class="p">$</span> lorefs diff research/pricing.md
+<span class="d">--- version 2 (23 Nov 10:41, laptop)</span>
+<span class="d">+++ current</span>
+<span class="c">@@ -1,3 +1,4 @@</span>
+ # Pricing notes
+ 
+<span class="r">-Starter at $9, team at $29.</span>
+<span class="g">+Starter at $9, team at $24.</span>
+<span class="g">+Annual saves 20%.</span>
+
+<span class="p">$</span> lorefs sandbox create research try1     <span class="d"># a private copy for an agent</span>
+<span class="p">$</span> lorefs status
+LoreFS drive &quot;demo&quot; on laptop
+
+  <span class="g">✓</span> Drive            mounted at ~/Lore
+  <span class="g">✓</span> Index            a trial drive: the index is a file on this computer
+  <span class="g">✓</span> Storage          reachable (local folder)
+  <span class="g">✓</span> Local cache      6.2 KiB of 50.0 GiB used
+  <span class="g">✓</span> Version history  recording versions, last one moments ago
+  <span class="g">✓</span> Index backup     not kept for a trial drive; it holds only test files
+  <span class="g">✓</span> Change log       on, kept for 24 hours
+  <span class="g">✓</span> Program          lorefs v0.1.0-rc.1 (no other computer has reported its version yet)
+</pre></div>

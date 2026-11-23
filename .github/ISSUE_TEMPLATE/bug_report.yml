@@ -1,0 +1,38 @@
+name: Bug report
+description: Something does not work as expected.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. lorefs create --local
+        2. Save a file twice
+        3. lorefs history ...
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `lorefs status`
+      description: It never contains secrets. Add `--json` if you can.
+      render: text
+  - type: input
+    id: setup
+    attributes:
+      label: Setup
+      placeholder: "lorefs version, Linux distribution, trial or shared drive, which storage and index"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "`journalctl --user -u lorefs-helper -u lorefs-mount -n 100`. Remove anything private."
+      render: text
