@@ -15,6 +15,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: false
       - name: Vet and unit tests
         run: |
           go vet ./...
@@ -44,6 +45,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: false
       - name: FUSE and tools
         run: |
           sudo apt-get update
