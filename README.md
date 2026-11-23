@@ -170,9 +170,6 @@ Any agent that can read and write files and run commands. [`AGENTS.md`](AGENTS.m
 **How is it different from JuiceFS?**
 JuiceFS is the filesystem engine underneath. LoreFS is the product around it: one-command setup, version history, sandboxes, status, backup and restore, updates.
 
-**Is it related to Epic Games' Lore, OpenLore or other projects named Lore?**
-No. It is an unrelated project that shares a word.
-
 **Is my data encrypted?**
 Connections to the index are encrypted and its certificate is checked. File contents are as private as your storage bucket; LoreFS does not add its own encryption of file contents.
 
