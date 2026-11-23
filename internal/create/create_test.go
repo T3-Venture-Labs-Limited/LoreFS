@@ -90,6 +90,12 @@ func TestExplainFormat(t *testing.T) {
 			t.Errorf("%q: got %v, want %v", c.out, err, c.want)
 		}
 	}
+	// A bucket that already holds a drive is that, even if the output also
+	// mentions a refusal earlier (a warning from the storage while looking).
+	mixed := "<WARNING>: Test storage failed: StatusCode: 403 AccessDenied (ignored)\n<FATAL>: Storage s3://x/b/d/ is not empty; please clean it up or pick another volume name"
+	if err := explainFormat(mixed, "https://s.example.net/b"); !errors.Is(err, ErrStorageInUse) {
+		t.Errorf("mixed output: got %v", err)
+	}
 	err := explainFormat("2026/11/20 17:02:57.647128 juicefs[1] <FATAL>: something unexpected [format@format.go:1]", "x")
 	if err == nil || !strings.Contains(err.Error(), "something unexpected") || strings.Contains(err.Error(), "format.go") {
 		t.Fatalf("got %v", err)
