@@ -1,6 +1,8 @@
 package mount
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -36,6 +38,9 @@ func TestMountArgumentsKeepTheSafetyOptions(t *testing.T) {
 }
 
 func TestIndexURLByScheme(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("LOREFS_CONFIG_DIR", dir)
+	os.WriteFile(filepath.Join(dir, "ca.pem"), []byte("x"), 0o600) // an index with its own certificate authority
 	c := base()
 	u := IndexURL(c)
 	if !strings.HasPrefix(u, "rediss://index.example.net:6379/1?") || !strings.Contains(u, "tls-ca-cert-file=") {
@@ -51,5 +56,12 @@ func TestIndexURLByScheme(t *testing.T) {
 	c.IndexScheme, c.IndexPath = config.SchemeSQLite, "/home/alice/.local/share/lorefs/local/trial/meta.db"
 	if u = IndexURL(c); u != "sqlite3:///home/alice/.local/share/lorefs/local/trial/meta.db" {
 		t.Fatalf("trial: %s", u)
+	}
+}
+
+func TestIndexURLWithoutOwnCertificateAuthority(t *testing.T) {
+	t.Setenv("LOREFS_CONFIG_DIR", t.TempDir())
+	if u := IndexURL(base()); strings.Contains(u, "tls-ca-cert-file") {
+		t.Fatalf("a certificate from a public authority needs no file: %s", u)
 	}
 }
